@@ -37,6 +37,16 @@ npm run typecheck
 npm run lint
 ```
 
+## Validating the Plugin Package
+
+CI runs Grafana's plugin validator, including the semgrep code rules that Grafana's plugin review applies, and fails on any `code-rules-*` finding.
+To run it locally (needs Docker and `jq`), build, package and validate the committed source:
+
+```bash
+npm run build && scripts/package-plugin.sh /tmp
+scripts/validate-plugin.sh /tmp/agoda-llmtraces-app-<version>.zip
+```
+
 ## Submitting Changes
 
 1. Fork the repository
