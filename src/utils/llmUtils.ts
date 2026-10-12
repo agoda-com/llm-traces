@@ -74,6 +74,8 @@ export interface LlmSpanData {
   invocationParams: LlmInvocationParams;
   finishReason?: string;
   precomputedCostUsd?: number;
+  // Explains why a span has no messages even though it is an LLM or tool span (content capture off).
+  contentNotices?: string[];
 }
 
 /**
@@ -99,6 +101,13 @@ function getAttr(tags: KeyValuePair[], key: string): string | undefined {
 
 function getRawAttr(tags: KeyValuePair[], key: string): unknown {
   return tags.find((tag) => tag.key === key)?.value;
+}
+
+// Attribute text before escape decoding. JSON must be parsed from this form: decoding first turns
+// escape sequences such as an escaped backslash followed by "u0041" into invalid JSON.
+function getRawStringAttr(tags: KeyValuePair[], key: string): string | undefined {
+  const value = getRawAttr(tags, key);
+  return value === null || value === undefined ? undefined : String(value);
 }
 
 function getNumAttr(tags: KeyValuePair[], key: string): number | undefined {
@@ -127,13 +136,28 @@ function isRecord(val: unknown): val is Record<string, unknown> {
   return typeof val === 'object' && val !== null && !Array.isArray(val);
 }
 
+// Some producers escape twice, so text inside parsed JSON can still contain literal \uXXXX sequences.
+// JSON is parsed from the raw attribute first; the resulting display strings are decoded afterwards.
+function decodeStrings(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return decodeUnicodeEscapes(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(decodeStrings);
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, decodeStrings(entry)]));
+  }
+  return value;
+}
+
 function stringifyValue(value: unknown): string {
   if (typeof value === 'string') {
     return decodeUnicodeEscapes(value);
   }
   if (value !== null && typeof value === 'object') {
     try {
-      return JSON.stringify(value);
+      return JSON.stringify(decodeStrings(value));
     } catch {
       return '';
     }
@@ -230,11 +254,13 @@ function extractVertexToolDefinitions(jsonBlob: string | undefined): LlmToolDefi
     return [];
   }
   const parsed = parseJsonValue(jsonBlob);
-  if (!isRecord(parsed) || !Array.isArray(parsed.tools)) {
+  if (!isRecord(parsed)) {
     return [];
   }
+  const config = isRecord(parsed.config) ? parsed.config : {};
+  const tools = [config.tools, parsed.tools].flatMap((list) => (Array.isArray(list) ? list : []));
   const definitions: LlmToolDefinition[] = [];
-  for (const tool of parsed.tools) {
+  for (const tool of tools) {
     if (!isRecord(tool)) {
       continue;
     }
@@ -243,7 +269,7 @@ function extractVertexToolDefinitions(jsonBlob: string | undefined): LlmToolDefi
       continue;
     }
     for (const declaration of declarations) {
-      definitions.push(normalizeToolDefinition(declaration, definitions.length));
+      definitions.push(normalizeToolDefinition(decodeStrings(declaration), definitions.length));
     }
   }
   return definitions;
@@ -273,7 +299,7 @@ function normalizeMessagePart(raw: unknown): LlmMessagePart {
     const name = functionResponse.name;
     return {
       type: 'tool_result',
-      result: functionResponse.response ?? functionResponse.result ?? '',
+      result: decodeStrings(functionResponse.response ?? functionResponse.result ?? ''),
       toolCallId: id === undefined || id === null ? undefined : String(id),
       name: name === undefined || name === null ? undefined : String(name),
     };
@@ -301,7 +327,7 @@ function normalizeMessagePart(raw: unknown): LlmMessagePart {
     const name = part.name;
     return {
       type: 'tool_result',
-      result: part.response ?? part.result ?? part.output ?? part.content ?? '',
+      result: decodeStrings(part.response ?? part.result ?? part.output ?? part.content ?? ''),
       toolCallId: id === undefined || id === null ? undefined : String(id),
       name: name === undefined || name === null ? undefined : String(name),
     };
@@ -501,8 +527,9 @@ function extractMessagesFromEvents(logs: SpanLog[]): { input: LlmMessage[]; outp
     const eventName = log.name || getAttr(log.fields, 'event') || '';
     if (eventName === 'gen_ai.content.prompt' || eventName === 'gen_ai.user.message') {
       const content = getAttr(log.fields, 'gen_ai.prompt') || getAttr(log.fields, 'gen_ai.content') || '';
+      const rawContent = getRawStringAttr(log.fields, 'gen_ai.prompt') || getRawStringAttr(log.fields, 'gen_ai.content') || '';
       const role = getAttr(log.fields, 'role') || 'user';
-      const parsed = tryExtractMessages(content);
+      const parsed = tryExtractMessages(rawContent);
       if (parsed.length > 0) {
         nonSystemInput.push(...parsed);
       } else if (content) {
@@ -515,14 +542,15 @@ function extractMessagesFromEvents(logs: SpanLog[]): { input: LlmMessage[]; outp
       }
     } else if (eventName === 'gen_ai.content.completion' || eventName === 'gen_ai.assistant.message') {
       const content = getAttr(log.fields, 'gen_ai.completion') || getAttr(log.fields, 'gen_ai.content') || '';
-      const parsed = tryExtractMessages(content);
+      const rawContent = getRawStringAttr(log.fields, 'gen_ai.completion') || getRawStringAttr(log.fields, 'gen_ai.content') || '';
+      const parsed = tryExtractMessages(rawContent);
       if (parsed.length > 0) {
         output.push(...parsed);
       } else if (content) {
         output.push({ role: 'assistant', content });
       }
     } else if (eventName === 'gen_ai.choice') {
-      const content = getAttr(log.fields, 'gen_ai.completion') || getAttr(log.fields, 'gen_ai.content') || '';
+      const content = getRawStringAttr(log.fields, 'gen_ai.completion') || getRawStringAttr(log.fields, 'gen_ai.content') || '';
       const choiceIndexRaw = getAttr(log.fields, 'gen_ai.choice.index');
       const choiceIndex = choiceIndexRaw !== undefined ? parseInt(choiceIndexRaw, 10) : 0;
       const existing = choiceAccumulator.get(choiceIndex);
@@ -540,7 +568,7 @@ function extractMessagesFromEvents(logs: SpanLog[]): { input: LlmMessage[]; outp
       if (parsed.length > 0) {
         output.push(...parsed);
       } else if (chunk.content) {
-        output.push({ role: 'assistant', content: chunk.content });
+        output.push({ role: 'assistant', content: decodeUnicodeEscapes(chunk.content) });
       }
     }
   }
@@ -555,13 +583,17 @@ function extractGcpVertexRequestMessages(jsonBlob: string): LlmMessage[] {
       return [];
     }
     const messages: LlmMessage[] = [];
-    const sysInstr = parsed.system_instruction;
+    // ADK nests the system instruction under config; the Vertex SDK request keeps it at the top level.
+    const config = isRecord(parsed.config) ? parsed.config : {};
+    const sysInstr = [config.systemInstruction, config.system_instruction, parsed.systemInstruction, parsed.system_instruction]
+      .find((candidate) => candidate !== undefined && candidate !== null);
     if (typeof sysInstr === 'string' && sysInstr) {
       messages.push({ role: 'system', content: sysInstr });
     } else if (isRecord(sysInstr)) {
+      // The instruction content often carries role "user"; it is still the system prompt.
       const message = normalizeMessage(sysInstr, 'system');
       if (message) {
-        messages.push(message);
+        messages.push({ ...message, role: 'system' });
       }
     }
     if (Array.isArray(parsed.contents)) {
@@ -581,8 +613,13 @@ function extractGcpVertexRequestMessages(jsonBlob: string): LlmMessage[] {
 function extractGcpVertexResponseMessages(jsonBlob: string): LlmMessage[] {
   try {
     const parsed = JSON.parse(jsonBlob);
-    if (!isRecord(parsed) || !Array.isArray(parsed.candidates)) {
+    if (!isRecord(parsed)) {
       return [];
+    }
+    // ADK LlmResponse carries a single `content`; the Vertex SDK response lists `candidates`.
+    if (!Array.isArray(parsed.candidates)) {
+      const message = isRecord(parsed.content) ? normalizeMessage(parsed.content, 'model') : undefined;
+      return message ? [message] : [];
     }
     return (parsed.candidates as unknown[]).map((c) => {
       if (!isRecord(c) || !isRecord(c.content)) {
@@ -593,6 +630,102 @@ function extractGcpVertexResponseMessages(jsonBlob: string): LlmMessage[] {
   } catch {
     return [];
   }
+}
+
+type AdkContentState = 'captured' | 'not-captured' | 'not-serialized';
+
+// With ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS disabled ADK writes "{}" instead of the content. When it
+// cannot serialize the content it writes <not serializable> or {"error": "serialization failed"}.
+function getAdkContentState(raw: string | undefined): AdkContentState | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const text = raw.trim();
+  if (text === '{}') {
+    return 'not-captured';
+  }
+  if (text === '<not serializable>') {
+    return 'not-serialized';
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (isRecord(parsed) && Object.keys(parsed).length === 1 && parsed.error === 'serialization failed') {
+      return 'not-serialized';
+    }
+  } catch {
+    // not JSON: the content was captured as plain text
+  }
+  return 'captured';
+}
+
+const ADK_NOT_CAPTURED_NOTICE =
+  'Message content was not captured for this span (ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS is disabled).';
+
+function getAdkContentNotices(tags: KeyValuePair[]): string[] {
+  const isToolSpan = tags.some((t) => t.key === 'gcp.vertex.agent.tool_call_args' || t.key === 'gcp.vertex.agent.tool_response');
+  const checks: Array<{ label: string; state: AdkContentState | undefined }> = isToolSpan
+    ? [
+        { label: 'tool arguments', state: getAdkContentState(getRawStringAttr(tags, 'gcp.vertex.agent.tool_call_args')) },
+        { label: 'tool response', state: getAdkContentState(getRawStringAttr(tags, 'gcp.vertex.agent.tool_response')) },
+      ]
+    : [
+        { label: 'request', state: getAdkContentState(getRawStringAttr(tags, 'gcp.vertex.agent.llm_request')) },
+        { label: 'response', state: getAdkContentState(getRawStringAttr(tags, 'gcp.vertex.agent.llm_response')) },
+      ];
+  const notices: string[] = [];
+  // A tool without arguments legitimately records "{}" arguments, so a tool span only counts as
+  // not captured when its response was not captured either.
+  const notCaptured = isToolSpan
+    ? checks.every(({ state }) => state === 'not-captured')
+    : checks.some(({ state }) => state === 'not-captured');
+  if (notCaptured) {
+    notices.push(ADK_NOT_CAPTURED_NOTICE);
+  }
+  for (const { label, state } of checks) {
+    if (state === 'not-serialized') {
+      notices.push(`ADK could not serialize the ${label} for this span.`);
+    }
+  }
+  return notices;
+}
+
+// ADK `execute_tool` spans record the call and its result as separate attributes instead of messages.
+// They are shown as one assistant tool call followed by one tool result.
+function extractAdkToolMessages(tags: KeyValuePair[]): { input: LlmMessage[]; output: LlmMessage[] } | undefined {
+  // Valid JSON is parsed before its strings are decoded; anything else is decoded as plain text.
+  const jsonOrDecoded = (raw: string | undefined): string | undefined => {
+    if (raw === undefined) {
+      return undefined;
+    }
+    try {
+      return JSON.stringify(decodeStrings(JSON.parse(raw)));
+    } catch {
+      return decodeUnicodeEscapes(raw);
+    }
+  };
+  const args = jsonOrDecoded(getRawStringAttr(tags, 'gcp.vertex.agent.tool_call_args'));
+  const response = jsonOrDecoded(getRawStringAttr(tags, 'gcp.vertex.agent.tool_response'));
+  if (args === undefined && response === undefined) {
+    return undefined;
+  }
+  if (getAdkContentNotices(tags).includes(ADK_NOT_CAPTURED_NOTICE)) {
+    return undefined;
+  }
+  const name = getAttr(tags, 'gen_ai.tool.name') ?? 'unknown';
+  const callId = getAttr(tags, 'gen_ai.tool.call.id');
+  // ADK writes this placeholder when the response event carries no function response id.
+  const id = callId && callId !== '<not specified>' ? callId : undefined;
+  const toolCall: LlmToolCall = { name, arguments: args ?? '', ...(id ? { id } : {}) };
+  return {
+    input: args === undefined ? [] : [{ role: 'assistant', content: '', parts: [{ type: 'tool_call', toolCall }], toolCalls: [toolCall] }],
+    output: response === undefined ? [] : [{
+      role: 'tool',
+      content: '',
+      parts: [{ type: 'tool_result', result: response, toolCallId: id, name }],
+      ...(id ? { toolCallId: id } : {}),
+      name,
+    }],
+  };
 }
 
 function detectConvention(tags: KeyValuePair[]): LlmConvention | null {
@@ -642,7 +775,7 @@ function extractOpenInference(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSp
     }
   }
   if (inputMessages.length === 0) {
-    const gcpReq = getAttr(tags, 'gcp.vertex.agent.llm_request');
+    const gcpReq = getRawStringAttr(tags, 'gcp.vertex.agent.llm_request');
     if (gcpReq) {
       inputMessages = extractGcpVertexRequestMessages(gcpReq);
     }
@@ -658,7 +791,7 @@ function extractOpenInference(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSp
     }
   }
   if (outputMessages.length === 0) {
-    const gcpResp = getAttr(tags, 'gcp.vertex.agent.llm_response');
+    const gcpResp = getRawStringAttr(tags, 'gcp.vertex.agent.llm_response');
     if (gcpResp) {
       outputMessages = extractGcpVertexResponseMessages(gcpResp);
     }
@@ -666,7 +799,7 @@ function extractOpenInference(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSp
   if (inputMessages.length === 0) {
     const inputValue = getAttr(tags, 'input.value');
     if (inputValue) {
-      inputMessages = extractMessagesFromJsonValue(inputValue);
+      inputMessages = extractMessagesFromJsonValue(getRawStringAttr(tags, 'input.value') ?? inputValue);
       if (inputMessages.length === 0 && inputValue.trim()) {
         inputMessages = [{ role: 'user', content: inputValue }];
       }
@@ -675,7 +808,7 @@ function extractOpenInference(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSp
   if (outputMessages.length === 0) {
     const outputValue = getAttr(tags, 'output.value');
     if (outputValue) {
-      outputMessages = extractMessagesFromJsonValue(outputValue);
+      outputMessages = extractMessagesFromJsonValue(getRawStringAttr(tags, 'output.value') ?? outputValue);
       if (outputMessages.length === 0 && outputValue.trim()) {
         outputMessages = [{ role: 'assistant', content: outputValue }];
       }
@@ -687,7 +820,7 @@ function extractOpenInference(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSp
     outputMessages = fromEvents.output;
   }
   let invocationParams: LlmInvocationParams = {};
-  const invParamsStr = getAttr(tags, 'llm.invocation_parameters');
+  const invParamsStr = getRawStringAttr(tags, 'llm.invocation_parameters');
   if (invParamsStr) {
     let parsed = false;
     try {
@@ -749,7 +882,7 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
   if (inputMessages.length === 0) {
     const prompt = getAttr(tags, 'gen_ai.prompt');
     if (prompt) {
-      const parsed = extractMessagesFromJsonValue(prompt);
+      const parsed = extractMessagesFromJsonValue(getRawStringAttr(tags, 'gen_ai.prompt') ?? prompt);
       inputMessages.push(...(parsed.length > 0 ? parsed : [{ role: 'user', content: prompt }]));
     }
   }
@@ -766,7 +899,7 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
   if (outputMessages.length === 0) {
     const completion = getAttr(tags, 'gen_ai.completion');
     if (completion) {
-      const parsed = extractMessagesFromJsonValue(completion);
+      const parsed = extractMessagesFromJsonValue(getRawStringAttr(tags, 'gen_ai.completion') ?? completion);
       outputMessages.push(...(parsed.length > 0 ? parsed : [{ role: 'assistant', content: completion }]));
     }
   }
@@ -780,7 +913,7 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
     // Traceloop flat-indexed format: gen_ai.completion.{i}.role / gen_ai.completion.{i}.content
     outputMessages.push(...extractIndexedMessages(tags, 'gen_ai.completion.'));
   }
-  const finishReasonsRaw = getAttr(tags, 'gen_ai.response.finish_reasons');
+  const finishReasonsRaw = getRawStringAttr(tags, 'gen_ai.response.finish_reasons');
   let finishReasonFromArray: string | undefined;
   if (finishReasonsRaw) {
     try {
@@ -835,7 +968,7 @@ function extractGeneric(tags: KeyValuePair[], logs: SpanLog[], operationName?: s
   const inputKeys = ['workflow.input', 'input.value', 'input', 'request.body', 'llm.input', 'prompt'];
   const outputKeys = ['workflow.output', 'output.value', 'output', 'response.body', 'llm.output', 'completion'];
   for (const key of inputKeys) {
-    const val = getAttr(tags, key);
+    const val = getRawStringAttr(tags, key);
     if (val && looksLikeMessages(val)) {
       inputMessages = extractMessagesFromJsonValue(val);
       if (inputMessages.length > 0) {
@@ -844,7 +977,7 @@ function extractGeneric(tags: KeyValuePair[], logs: SpanLog[], operationName?: s
     }
   }
   for (const key of outputKeys) {
-    const val = getAttr(tags, key);
+    const val = getRawStringAttr(tags, key);
     if (val && looksLikeMessages(val)) {
       outputMessages = extractMessagesFromJsonValue(val);
       if (outputMessages.length > 0) {
@@ -895,13 +1028,22 @@ export function extractLlmSpanData(tags: KeyValuePair[], logs: SpanLog[], operat
     case 'otel-genai':
       data = extractOtelGenAi(tags, logs);
       break;
-    case 'vertex':
+    case 'vertex': {
+      const toolMessages = extractAdkToolMessages(tags);
       data = {
         ...extractOpenInference(tags, logs),
         convention: 'vertex',
-        tools: extractVertexToolDefinitions(getAttr(tags, 'gcp.vertex.agent.llm_request')),
+        tools: extractVertexToolDefinitions(getRawStringAttr(tags, 'gcp.vertex.agent.llm_request')),
       };
+      if (toolMessages && data.inputMessages.length === 0 && data.outputMessages.length === 0) {
+        data = { ...data, inputMessages: toolMessages.input, outputMessages: toolMessages.output };
+      }
+      const contentNotices = getAdkContentNotices(tags);
+      if (contentNotices.length > 0) {
+        data = { ...data, contentNotices };
+      }
       break;
+    }
     default:
       data = extractGeneric(tags, logs, operationName);
   }
@@ -957,6 +1099,9 @@ export function getLlmDisplayAttributeKeys(
   if (getSpanKind(tags)) {
     if (data.convention === 'openinference' || data.convention === 'vertex') {
       addExact('openinference.span.kind', 'llm.request.type');
+      if (data.convention === 'vertex') {
+        addExact('gen_ai.operation.name');
+      }
     } else if (data.convention === 'otel-genai') {
       addExact('gen_ai.operation.name');
     }
@@ -974,6 +1119,9 @@ export function getLlmDisplayAttributeKeys(
     if (data.tools.length > 0) {
       addExact('gcp.vertex.agent.llm_request');
       addPrefixes('llm.tools.');
+    }
+    if (data.convention === 'vertex' && (data.inputMessages.length > 0 || data.outputMessages.length > 0)) {
+      addExact('gcp.vertex.agent.tool_call_args', 'gcp.vertex.agent.tool_response', 'gen_ai.tool.name', 'gen_ai.tool.call.id');
     }
   } else if (data.convention === 'otel-genai') {
     if (data.inputMessages.length > 0) {
@@ -1094,10 +1242,15 @@ export function isLlmSpan(tags: KeyValuePair[]): boolean {
       t.key === 'llm.request.type' ||
       t.key.startsWith('llm.input_messages.') ||
       t.key.startsWith('llm.prompts.') ||
-      t.key.startsWith('gen_ai.usage.') ||
-      t.key.startsWith('gcp.vertex.agent.')
+      t.key.startsWith('gen_ai.usage.')
   )) {
     return true;
+  }
+  // ADK tool and agent spans carry placeholder gcp.vertex.agent.llm_request/llm_response attributes
+  // although they do not call a model.
+  if (tags.some((t) => t.key.startsWith('gcp.vertex.agent.'))) {
+    const kind = getSpanKind(tags);
+    return kind !== 'TOOL' && kind !== 'AGENT';
   }
   // Generic convention: operation.type containing "completion"
   return tags.some(
@@ -1125,6 +1278,8 @@ const OTEL_OPERATION_TO_KIND: Record<string, string> = {
   text_completion: 'LLM',
   completions: 'LLM',
   generate: 'LLM',
+  generate_content: 'LLM',
+  call_llm: 'LLM',
   // AGENT
   invoke_agent: 'AGENT',
   execute_agent: 'AGENT',

@@ -258,6 +258,12 @@ export const getStyles = (theme: GrafanaTheme2) => ({
     color: theme.colors.text.disabled,
     fontStyle: 'italic',
   }),
+  contentNotice: css({
+    color: theme.colors.text.secondary,
+    fontSize: theme.typography.bodySmall.fontSize,
+    fontStyle: 'italic',
+    padding: `${theme.spacing(0.5)} ${theme.spacing(1)}`,
+  }),
   markdownContent: css({
     padding: `${theme.spacing(1)} ${theme.spacing(1.5)}`,
     fontSize: theme.typography.bodySmall.fontSize,

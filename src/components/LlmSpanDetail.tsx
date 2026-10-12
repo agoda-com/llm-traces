@@ -205,7 +205,9 @@ function MessageBlock({
   const additionalToolCalls = message.toolCalls?.filter(
     (toolCall) => !partToolCalls.some((partToolCall) => sameToolCall(toolCall, partToolCall))
   ) ?? [];
-  const hasSemanticContent = Boolean(message.content) || parts.length > 0 || additionalToolCalls.length > 0;
+  const hasSemanticContent = Boolean(message.content)
+    || parts.some((part) => part.type !== 'text' || part.text !== '')
+    || additionalToolCalls.length > 0;
   const contentClass = showMarkdown && canMarkdown ? styles.markdownContent : styles.messageContent;
 
   return (
@@ -573,6 +575,10 @@ export function LlmSpanDetail({ tags, llmData }: LlmSpanDetailProps) {
         {llmData.system && <span className={styles.conventionBadge}>{llmData.system}</span>}
         {llmData.finishReason && <FinishReasonBadge reason={llmData.finishReason} />}
       </div>
+
+      {llmData.contentNotices?.map((notice) => (
+        <div key={notice} className={styles.contentNotice} data-testid="content-notice">{notice}</div>
+      ))}
 
       {llmData.inputMessages.length > 0 && (
         <CollapsibleSection

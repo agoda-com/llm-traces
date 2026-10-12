@@ -6,9 +6,11 @@ import {
   getLlmDisplayAttributeKeys,
   isLlmSpan,
   isEmbeddingSpan,
+  getSpanKind,
   type KeyValuePair,
   type SpanLog,
 } from '../src/utils/llmUtils.ts';
+import { ADK_EMPTY_LLM_RESPONSE, ADK_LLM_REQUEST, ADK_LLM_RESPONSE, ADK_SERIALIZATION_ERROR, ADK_TOOL_ARGS, ADK_TOOL_RESPONSE } from './fixtures/llm-trace.ts';
 
 // ---------------------------------------------------------------------------
 // Minimal assertion helpers
@@ -2012,6 +2014,251 @@ describe('LLM display attribute keys - supported semantic conventions', () => {
   ];
   const unknownKeys = getLlmDisplayAttributeKeys(unknownTags, extractLlmSpanData(unknownTags, []));
   assertEquals(unknownKeys.size, 0, 'ordinary spans do not collapse attributes');
+});
+
+// ---------------------------------------------------------------------------
+// 15. Google ADK spans (gcp.vertex.agent): real LlmRequest / LlmResponse shapes
+// ---------------------------------------------------------------------------
+
+describe('Google ADK call_llm - request with config.systemInstruction, config.tools and mixed roles', () => {
+  const tags = [
+    kv('gen_ai.system', 'gcp.vertex.agent'),
+    kv('gen_ai.operation.name', 'call_llm'),
+    kv('gen_ai.request.model', 'gemini-2.5-flash'),
+    kv('gen_ai.usage.input_tokens', '420'),
+    kv('gen_ai.usage.output_tokens', '7'),
+    kv('gcp.vertex.agent.llm_request', ADK_LLM_REQUEST),
+    kv('gcp.vertex.agent.llm_response', ADK_LLM_RESPONSE),
+  ];
+  const result = extractLlmSpanData(tags, [], 'call_llm');
+  const roles = result.inputMessages.map((m) => m.role);
+
+  assertEquals(result.convention, 'vertex', 'ADK span uses the vertex convention');
+  assertEquals(result.isLlm, true, 'ADK call_llm is an LLM span');
+  assertDeepEquals(roles, ['system', 'user', 'ag-context', 'model', 'user', 'model', 'user'], 'system, then every content role is kept in order');
+  assertEquals(result.inputMessages.length, 7, 'raw JSON with an escaped backslash-u sequence parses and yields every message');
+  assertEquals(
+    result.inputMessages[0].content,
+    'You are a trip planning assistant.\nAnswer travelers in their language, for example Café or Zürich.\nSample code point: A.',
+    'system text keeps JSON escapes and decodes the escaped sequence for display'
+  );
+  assertEquals(
+    result.inputMessages[1].content,
+    'Find me a flight from Paris to Rome. Destination note: 英語',
+    'parsed text holding literal unicode escapes is decoded for display'
+  );
+  assertEquals(result.inputMessages[2].content, 'Traveler prefers morning departures.', 'custom ag-context role keeps its text');
+
+  const call = result.inputMessages[3].parts?.[0];
+  assert(call?.type === 'tool_call' && call.toolCall.name === 'search_flights' && call.toolCall.id === 'adk-call-1', 'model functionCall part becomes a tool_call part');
+  assertDeepEquals(
+    call?.type === 'tool_call' ? JSON.parse(call.toolCall.arguments) : null,
+    { origin: 'CDG', destination: 'FCO' },
+    'functionCall args are kept as the tool call arguments'
+  );
+  const toolResult = result.inputMessages[4].parts?.[0];
+  assert(
+    toolResult?.type === 'tool_result' && toolResult.toolCallId === 'adk-call-1' && toolResult.name === 'search_flights',
+    'user functionResponse part becomes a tool_result part linked by id and name'
+  );
+  assertEquals(result.inputMessages[5].content, 'Flight FL100 departs at 08:15.', 'model text turn');
+
+  assertDeepEquals(result.tools.map((tool) => tool.name), ['search_flights', 'book_flight'], 'tools come from config.tools[].functionDeclarations');
+  assertEquals(result.tools.every((tool) => tool.isValid), true, 'declarations are valid tool definitions');
+
+  assertEquals(result.outputMessages.length, 1, 'response with content (no candidates) yields one output message');
+  assertEquals(result.outputMessages[0].role, 'model', 'output role is model');
+  assertEquals(result.outputMessages[0].content, 'You are all set for FL100.', 'output text from content.parts');
+  assertEquals(result.tokenUsage.input, 420, 'input tokens');
+  assertEquals(result.tokenUsage.output, 7, 'output tokens');
+
+  const shown = getLlmDisplayAttributeKeys(tags, result);
+  assert(shown.has('gcp.vertex.agent.llm_request'), 'llm_request is listed as shown above');
+  assert(shown.has('gcp.vertex.agent.llm_response'), 'llm_response is listed as shown above');
+  assert(shown.has('gen_ai.operation.name'), 'operation name behind the kind badge is listed as shown above');
+});
+
+describe('Google ADK call_llm - empty text response still produces an output message', () => {
+  const tags = [
+    kv('gen_ai.system', 'gcp.vertex.agent'),
+    kv('gcp.vertex.agent.llm_request', ADK_LLM_REQUEST),
+    kv('gcp.vertex.agent.llm_response', ADK_EMPTY_LLM_RESPONSE),
+  ];
+  const result = extractLlmSpanData(tags, [], 'call_llm');
+  assertEquals(result.outputMessages.length, 1, 'one output message for an empty text part');
+  assertEquals(result.outputMessages[0].content, '', 'output text is empty');
+});
+
+describe('Google ADK - top-level and snake_case request forms are still supported', () => {
+  const snakeCase = JSON.stringify({
+    config: { system_instruction: 'Be brief.', tools: [{ function_declarations: [{ name: 'lookup', parameters: { type: 'object' } }] }] },
+    contents: [{ role: 'user', parts: [{ text: 'Hi' }] }],
+  });
+  const snakeResult = extractLlmSpanData([kv('gen_ai.system', 'gcp.vertex.agent'), kv('gcp.vertex.agent.llm_request', snakeCase)], []);
+  assertEquals(snakeResult.inputMessages[0].role, 'system', 'config.system_instruction string becomes the system message');
+  assertEquals(snakeResult.inputMessages[0].content, 'Be brief.', 'system string content');
+  assertEquals(snakeResult.tools.length, 1, 'config.tools with function_declarations');
+
+  const topLevel = JSON.stringify({
+    systemInstruction: { role: 'user', parts: [{ text: 'Top level.' }] },
+    tools: [{ functionDeclarations: [{ name: 'lookup' }] }],
+    contents: [{ role: 'user', parts: [{ text: 'Hi' }] }],
+  });
+  const topResult = extractLlmSpanData([kv('gen_ai.system', 'gcp.vertex.agent'), kv('gcp.vertex.agent.llm_request', topLevel)], []);
+  assertEquals(topResult.inputMessages[0].role, 'system', 'top-level systemInstruction is shown as system even when it carries a user role');
+  assertEquals(topResult.inputMessages[0].content, 'Top level.', 'top-level systemInstruction object');
+  assertEquals(topResult.tools.length, 1, 'top-level tools');
+});
+
+describe('Google ADK execute_tool - arguments and response render as a tool call and result', () => {
+  const tags = [
+    kv('gen_ai.operation.name', 'execute_tool'),
+    kv('gen_ai.tool.name', 'search_flights'),
+    kv('gen_ai.tool.call.id', 'adk-call-1'),
+    kv('gcp.vertex.agent.llm_request', '{}'),
+    kv('gcp.vertex.agent.llm_response', '{}'),
+    kv('gcp.vertex.agent.tool_call_args', ADK_TOOL_ARGS),
+    kv('gcp.vertex.agent.tool_response', ADK_TOOL_RESPONSE),
+  ];
+  const result = extractLlmSpanData(tags, [], 'execute_tool search_flights');
+  const call = result.inputMessages[0]?.parts?.[0];
+  const output = result.outputMessages[0]?.parts?.[0];
+  assert(call?.type === 'tool_call' && call.toolCall.name === 'search_flights' && call.toolCall.id === 'adk-call-1', 'tool args become a tool_call input');
+  assertEquals(call?.type === 'tool_call' ? call.toolCall.arguments : '', ADK_TOOL_ARGS, 'tool call arguments carry the recorded JSON');
+  assert(output?.type === 'tool_result' && output.toolCallId === 'adk-call-1' && output.name === 'search_flights', 'tool response becomes a linked tool_result output');
+  assertEquals(result.tools.length, 0, 'placeholder llm_request {} yields no tools');
+  assertEquals(isLlmSpan(tags), false, 'execute_tool span is not counted as an LLM span');
+  assert(getLlmDisplayAttributeKeys(tags, result).has('gcp.vertex.agent.tool_response'), 'tool_response is listed as shown above');
+
+  const escaped = extractLlmSpanData([
+    kv('gen_ai.operation.name', 'execute_tool'),
+    kv('gen_ai.tool.name', 'search_flights'),
+    kv('gcp.vertex.agent.tool_call_args', '{"city":"Z\\u00fcrich"}'),
+    kv('gcp.vertex.agent.tool_response', '{"note":"Caf\\u00e9 and literal \\\\u0041"}'),
+  ], []);
+  const escapedCall = escaped.inputMessages[0]?.parts?.[0];
+  const escapedResult = escaped.outputMessages[0]?.parts?.[0];
+  assertEquals(escapedCall?.type === 'tool_call' ? JSON.parse(escapedCall.toolCall.arguments).city : '', 'Zürich', 'tool args keep JSON escapes parseable');
+  assertEquals(escapedResult?.type === 'tool_result' ? JSON.parse(String(escapedResult.result)).note : '', 'Café and literal A', 'tool response with an escaped backslash-u parses and is decoded for display');
+
+  const unspecified = extractLlmSpanData([
+    kv('gen_ai.operation.name', 'execute_tool'),
+    kv('gen_ai.tool.name', 'search_flights'),
+    kv('gen_ai.tool.call.id', '<not specified>'),
+    kv('gcp.vertex.agent.tool_call_args', ADK_TOOL_ARGS),
+    kv('gcp.vertex.agent.tool_response', ADK_TOOL_RESPONSE),
+  ], []);
+  const unspecifiedCall = unspecified.inputMessages[0]?.parts?.[0];
+  assertEquals(unspecifiedCall?.type === 'tool_call' ? unspecifiedCall.toolCall.id : 'missing', undefined, 'the <not specified> placeholder is not used as a call id');
+});
+
+describe('Google ADK - content that ADK did not capture is reported, not silently empty', () => {
+  const notCaptured = 'Message content was not captured for this span (ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS is disabled).';
+  const disabled = extractLlmSpanData([
+    kv('gen_ai.system', 'gcp.vertex.agent'),
+    kv('gen_ai.operation.name', 'call_llm'),
+    kv('gen_ai.request.model', 'gemini-2.5-flash'),
+    kv('gen_ai.usage.input_tokens', '420'),
+    kv('gen_ai.usage.output_tokens', '7'),
+    kv('gcp.vertex.agent.llm_request', '{}'),
+    kv('gcp.vertex.agent.llm_response', '{}'),
+  ], [], 'call_llm');
+  assertDeepEquals(disabled.contentNotices, [notCaptured], 'request and response "{}" give one not-captured notice');
+  assertEquals(disabled.inputMessages.length + disabled.outputMessages.length, 0, 'no messages are invented');
+  assertEquals(disabled.model, 'gemini-2.5-flash', 'model is still extracted');
+  assertEquals(disabled.tokenUsage.input, 420, 'token usage is still extracted');
+
+  const failed = extractLlmSpanData([
+    kv('gen_ai.system', 'gcp.vertex.agent'),
+    kv('gcp.vertex.agent.llm_request', ADK_SERIALIZATION_ERROR),
+    kv('gcp.vertex.agent.llm_response', '<not serializable>'),
+  ], []);
+  assertDeepEquals(
+    failed.contentNotices,
+    ['ADK could not serialize the request for this span.', 'ADK could not serialize the response for this span.'],
+    'serialization failures are reported per attribute'
+  );
+
+  const captured = extractLlmSpanData([
+    kv('gen_ai.system', 'gcp.vertex.agent'),
+    kv('gcp.vertex.agent.llm_request', ADK_LLM_REQUEST),
+    kv('gcp.vertex.agent.llm_response', ADK_LLM_RESPONSE),
+  ], []);
+  assertEquals(captured.contentNotices, undefined, 'captured content has no notice');
+
+  const toolDisabled = extractLlmSpanData([
+    kv('gen_ai.operation.name', 'execute_tool'),
+    kv('gen_ai.tool.name', 'search_flights'),
+    kv('gcp.vertex.agent.llm_request', '{}'),
+    kv('gcp.vertex.agent.llm_response', '{}'),
+    kv('gcp.vertex.agent.tool_call_args', '{}'),
+    kv('gcp.vertex.agent.tool_response', '{}'),
+  ], []);
+  assertDeepEquals(toolDisabled.contentNotices, [notCaptured], 'execute_tool with "{}" arguments and response gives the not-captured notice');
+  assertEquals(toolDisabled.inputMessages.length + toolDisabled.outputMessages.length, 0, 'no tool cards for uncaptured arguments and response');
+
+  const noArgsTool = extractLlmSpanData([
+    kv('gen_ai.operation.name', 'execute_tool'),
+    kv('gen_ai.tool.name', 'ping'),
+    kv('gcp.vertex.agent.llm_request', '{}'),
+    kv('gcp.vertex.agent.llm_response', '{}'),
+    kv('gcp.vertex.agent.tool_call_args', '{}'),
+    kv('gcp.vertex.agent.tool_response', ADK_TOOL_RESPONSE),
+  ], []);
+  assertEquals(noArgsTool.contentNotices, undefined, 'a captured tool response with no arguments is not reported');
+  assertEquals(noArgsTool.outputMessages.length, 1, 'the captured tool response is still shown');
+
+  const toolFailed = extractLlmSpanData([
+    kv('gen_ai.operation.name', 'execute_tool'),
+    kv('gen_ai.tool.name', 'search_flights'),
+    kv('gcp.vertex.agent.tool_call_args', ADK_TOOL_ARGS),
+    kv('gcp.vertex.agent.tool_response', '<not serializable>'),
+  ], []);
+  assertDeepEquals(toolFailed.contentNotices, ['ADK could not serialize the tool response for this span.'], 'tool response serialization failure is reported');
+
+  const toolError = extractLlmSpanData([
+    kv('gen_ai.operation.name', 'execute_tool'),
+    kv('gen_ai.tool.name', 'search_flights'),
+    kv('gcp.vertex.agent.tool_call_args', ADK_TOOL_ARGS),
+    kv('gcp.vertex.agent.tool_response', '{"error":"flight service unavailable"}'),
+  ], []);
+  assertEquals(toolError.contentNotices, undefined, 'an error returned by the tool itself is tool output, not a serialization failure');
+
+  assertEquals(extractLlmSpanData([kv('gen_ai.system', 'openai'), kv('gen_ai.prompt', '{}')], []).contentNotices, undefined, 'non-ADK spans never get the notice');
+});
+
+describe('Google ADK - span kind badges', () => {
+  assertEquals(getSpanKind([kv('gen_ai.operation.name', 'call_llm')]), 'LLM', 'call_llm maps to LLM');
+  assertEquals(getSpanKind([kv('gen_ai.operation.name', 'generate_content')]), 'LLM', 'generate_content maps to LLM');
+  assertEquals(getSpanKind([kv('gen_ai.operation.name', 'execute_tool')]), 'TOOL', 'execute_tool maps to TOOL');
+  assertEquals(getSpanKind([kv('gen_ai.operation.name', 'invoke_agent')]), 'AGENT', 'invoke_agent maps to AGENT');
+});
+
+describe('JSON attribute values are parsed from the raw string, not from decoded text', () => {
+  const text = 'Path C:\\users\\unit and literal \\u0041';
+  const content = 'Path C:\\users\\unit and literal A';
+  const rawMessages = JSON.stringify([{ role: 'user', content: text }]);
+
+  const inputValue = extractLlmSpanData([kv('openinference.span.kind', 'LLM'), kv('input.value', rawMessages)], []);
+  assertEquals(inputValue.inputMessages[0]?.content, content, 'input.value JSON with an escaped backslash-u parses and is decoded for display');
+
+  const prompt = extractLlmSpanData([kv('gen_ai.system', 'openai'), kv('gen_ai.prompt', rawMessages)], []);
+  assertEquals(prompt.inputMessages[0]?.content, content, 'gen_ai.prompt JSON with an escaped backslash-u parses and is decoded for display');
+
+  const completion = extractLlmSpanData([kv('gen_ai.system', 'openai'), kv('gen_ai.completion', JSON.stringify([{ role: 'assistant', content: text }]))], []);
+  assertEquals(completion.outputMessages[0]?.content, content, 'gen_ai.completion JSON with an escaped backslash-u parses and is decoded for display');
+
+  const eventResult = extractLlmSpanData(
+    [kv('gen_ai.system', 'openai')],
+    [log('gen_ai.content.prompt', [kv('gen_ai.prompt', rawMessages)])]
+  );
+  assertEquals(eventResult.inputMessages[0]?.content, content, 'event gen_ai.prompt JSON with an escaped backslash-u parses and is decoded for display');
+
+  const params = extractLlmSpanData([kv('openinference.span.kind', 'LLM'), kv('llm.invocation_parameters', '{"temperature":0.5,"stop":"\\\\u0041"}')], []);
+  assertEquals((params.invocationParams as any).temperature, 0.5, 'llm.invocation_parameters with an escaped backslash-u parses');
+
+  const asciiEscaped = extractLlmSpanData([kv('openinference.span.kind', 'LLM'), kv('input.value', '[{"role":"user","content":"\\u82f1\\u8a9e"}]')], []);
+  assertEquals(asciiEscaped.inputMessages[0]?.content, '英語', 'ensure_ascii escapes inside JSON are still decoded');
 });
 
 // ---------------------------------------------------------------------------

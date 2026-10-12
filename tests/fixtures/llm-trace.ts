@@ -689,3 +689,206 @@ export const DEEP_NESTED_TRACE_RESPONSE = {
     }],
   }],
 };
+
+// ---------------------------------------------------------------------------
+// Google ADK (gcp.vertex.agent) fixture: call_llm and execute_tool spans
+// ---------------------------------------------------------------------------
+
+// Python's json.dumps escapes non-ASCII characters by default; ADK span attributes carry that form.
+const asciiJson = (value: unknown): string =>
+  JSON.stringify(value).replace(/[\u0080-￿]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
+
+export const ADK_SYSTEM_TEXT =
+  'You are a trip planning assistant.\nAnswer travelers in their language, for example Café or Zürich.\nSample code point: \\u0041.';
+
+// Message text that was escaped twice: the parsed string still holds literal \uXXXX sequences.
+export const ADK_DOUBLE_ESCAPED_TEXT = 'Destination note: \\u82f1\\u8a9e';
+
+export const ADK_LLM_REQUEST = asciiJson({
+  model: 'gemini-2.5-flash',
+  config: {
+    systemInstruction: { role: 'user', parts: [{ text: ADK_SYSTEM_TEXT }] },
+    tools: [{
+      functionDeclarations: [
+        {
+          name: 'search_flights',
+          description: 'Search flights between two airports.',
+          parameters: {
+            type: 'OBJECT',
+            properties: {
+              origin: { type: 'STRING', description: 'Departure airport code.' },
+              destination: { type: 'STRING', description: 'Arrival airport code.' },
+            },
+            required: ['origin', 'destination'],
+          },
+        },
+        {
+          name: 'book_flight',
+          description: 'Book a flight by its identifier.',
+          parameters: { type: 'OBJECT', properties: { flight_id: { type: 'STRING' } }, required: ['flight_id'] },
+        },
+      ],
+    }],
+  },
+  contents: [
+    { role: 'user', parts: [{ text: `Find me a flight from Paris to Rome. ${ADK_DOUBLE_ESCAPED_TEXT}` }] },
+    { role: 'ag-context', parts: [{ text: 'Traveler prefers morning departures.' }] },
+    { role: 'model', parts: [{ functionCall: { id: 'adk-call-1', name: 'search_flights', args: { origin: 'CDG', destination: 'FCO' } } }] },
+    { role: 'user', parts: [{ functionResponse: { id: 'adk-call-1', name: 'search_flights', response: { flights: [{ id: 'FL100', departs: '08:15' }] } } }] },
+    { role: 'model', parts: [{ text: 'Flight FL100 departs at 08:15.' }] },
+    { role: 'user', parts: [{ text: 'Thanks, that works.' }] },
+  ],
+});
+
+export const ADK_LLM_RESPONSE = asciiJson({
+  content: { role: 'model', parts: [{ text: 'You are all set for FL100.' }] },
+  usageMetadata: { candidatesTokenCount: 7, promptTokenCount: 420 },
+  modelVersion: 'gemini-2.5-flash',
+  turnComplete: true,
+  customMetadata: [{ key: 'invocation', stringValue: 'adk-invocation-1' }],
+});
+
+export const ADK_EMPTY_LLM_RESPONSE = asciiJson({
+  content: { role: 'model', parts: [{ text: '' }] },
+  usageMetadata: { candidatesTokenCount: 0, promptTokenCount: 420 },
+  modelVersion: 'gemini-2.5-flash',
+  turnComplete: true,
+});
+
+export const ADK_TOOL_ARGS = asciiJson({ origin: 'CDG', destination: 'FCO' });
+export const ADK_TOOL_RESPONSE = asciiJson({ flights: [{ id: 'FL100', departs: '08:15' }] });
+
+const ADK_TRACE_ID = 'adkagent00112233445566778899aab';
+const ta = (offsetMs: number) => String(BigInt(1741900000000 + offsetMs) * 1000000n);
+const str = (key: string, value: string) => ({ key, value: { stringValue: value } });
+
+export const ADK_SEARCH_RESPONSE = {
+  traces: [{
+    traceID: ADK_TRACE_ID,
+    rootServiceName: 'adk-agent',
+    rootTraceName: 'invocation',
+    startTimeUnixNano: ta(0),
+    durationMs: 3000,
+    spanSets: [],
+  }],
+};
+
+export const ADK_TRACE_RESPONSE = {
+  resourceSpans: [{
+    resource: { attributes: [str('service.name', 'adk-agent')] },
+    scopeSpans: [{
+      scope: { name: 'gcp.vertex.agent' },
+      spans: [
+        {
+          traceId: ADK_TRACE_ID, spanId: 'adkspan0001', parentSpanId: '', name: 'invocation',
+          startTimeUnixNano: ta(0), endTimeUnixNano: ta(3000), attributes: [], events: [],
+        },
+        {
+          traceId: ADK_TRACE_ID, spanId: 'adkspan0002', parentSpanId: 'adkspan0001', name: 'call_llm',
+          startTimeUnixNano: ta(100), endTimeUnixNano: ta(1200),
+          attributes: [
+            str('gen_ai.system', 'gcp.vertex.agent'),
+            str('gen_ai.operation.name', 'call_llm'),
+            str('gen_ai.request.model', 'gemini-2.5-flash'),
+            { key: 'gen_ai.usage.input_tokens', value: { intValue: '420' } },
+            { key: 'gen_ai.usage.output_tokens', value: { intValue: '7' } },
+            str('gcp.vertex.agent.invocation_id', 'adk-invocation-1'),
+            str('gcp.vertex.agent.session_id', 'adk-session-1'),
+            str('gcp.vertex.agent.event_id', 'adk-event-1'),
+            str('gcp.vertex.agent.llm_request', ADK_LLM_REQUEST),
+            str('gcp.vertex.agent.llm_response', ADK_LLM_RESPONSE),
+          ],
+          events: [],
+        },
+        {
+          traceId: ADK_TRACE_ID, spanId: 'adkspan0003', parentSpanId: 'adkspan0001', name: 'execute_tool search_flights',
+          startTimeUnixNano: ta(1300), endTimeUnixNano: ta(1800),
+          attributes: [
+            str('gen_ai.operation.name', 'execute_tool'),
+            str('gen_ai.tool.name', 'search_flights'),
+            str('gen_ai.tool.description', 'Search flights between two airports.'),
+            str('gen_ai.tool.type', 'FunctionTool'),
+            str('gen_ai.tool.call.id', 'adk-call-1'),
+            str('gcp.vertex.agent.llm_request', '{}'),
+            str('gcp.vertex.agent.llm_response', '{}'),
+            str('gcp.vertex.agent.tool_call_args', ADK_TOOL_ARGS),
+            str('gcp.vertex.agent.tool_response', ADK_TOOL_RESPONSE),
+          ],
+          events: [],
+        },
+        {
+          traceId: ADK_TRACE_ID, spanId: 'adkspan0004', parentSpanId: 'adkspan0001', name: 'call_llm',
+          startTimeUnixNano: ta(1900), endTimeUnixNano: ta(2900),
+          attributes: [
+            str('gen_ai.system', 'gcp.vertex.agent'),
+            str('gen_ai.operation.name', 'call_llm'),
+            str('gen_ai.request.model', 'gemini-2.5-flash'),
+            str('gcp.vertex.agent.llm_request', ADK_LLM_REQUEST),
+            str('gcp.vertex.agent.llm_response', ADK_EMPTY_LLM_RESPONSE),
+          ],
+          events: [],
+        },
+      ],
+    }],
+  }],
+};
+
+// ADK writes "{}" for the content attributes when ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS is disabled and
+// an error document when it cannot serialize the content.
+export const ADK_SERIALIZATION_ERROR = '{"error": "serialization failed"}';
+
+export const ADK_UNCAPTURED_TRACE_RESPONSE = {
+  resourceSpans: [{
+    resource: { attributes: [str('service.name', 'adk-agent')] },
+    scopeSpans: [{
+      scope: { name: 'gcp.vertex.agent' },
+      spans: [
+        {
+          traceId: ADK_TRACE_ID, spanId: 'adkspan0001', parentSpanId: '', name: 'invocation',
+          startTimeUnixNano: ta(0), endTimeUnixNano: ta(3000), attributes: [], events: [],
+        },
+        {
+          traceId: ADK_TRACE_ID, spanId: 'adkspan0002', parentSpanId: 'adkspan0001', name: 'call_llm',
+          startTimeUnixNano: ta(100), endTimeUnixNano: ta(1200),
+          attributes: [
+            str('gen_ai.system', 'gcp.vertex.agent'),
+            str('gen_ai.operation.name', 'call_llm'),
+            str('gen_ai.request.model', 'gemini-2.5-flash'),
+            { key: 'gen_ai.usage.input_tokens', value: { intValue: '420' } },
+            { key: 'gen_ai.usage.output_tokens', value: { intValue: '7' } },
+            str('gcp.vertex.agent.llm_request', '{}'),
+            str('gcp.vertex.agent.llm_response', '{}'),
+          ],
+          events: [],
+        },
+        {
+          traceId: ADK_TRACE_ID, spanId: 'adkspan0003', parentSpanId: 'adkspan0001', name: 'execute_tool search_flights',
+          startTimeUnixNano: ta(1300), endTimeUnixNano: ta(1800),
+          attributes: [
+            str('gen_ai.operation.name', 'execute_tool'),
+            str('gen_ai.tool.name', 'search_flights'),
+            str('gen_ai.tool.call.id', 'adk-call-1'),
+            str('gcp.vertex.agent.llm_request', '{}'),
+            str('gcp.vertex.agent.llm_response', '{}'),
+            str('gcp.vertex.agent.tool_call_args', '{}'),
+            str('gcp.vertex.agent.tool_response', '{}'),
+          ],
+          events: [],
+        },
+        {
+          traceId: ADK_TRACE_ID, spanId: 'adkspan0004', parentSpanId: 'adkspan0001', name: 'call_llm',
+          startTimeUnixNano: ta(1900), endTimeUnixNano: ta(2900),
+          attributes: [
+            str('gen_ai.system', 'gcp.vertex.agent'),
+            str('gen_ai.operation.name', 'call_llm'),
+            str('gen_ai.request.model', 'gemini-2.5-flash'),
+            { key: 'gen_ai.usage.input_tokens', value: { intValue: '420' } },
+            str('gcp.vertex.agent.llm_request', ADK_SERIALIZATION_ERROR),
+            str('gcp.vertex.agent.llm_response', ADK_SERIALIZATION_ERROR),
+          ],
+          events: [],
+        },
+      ],
+    }],
+  }],
+};

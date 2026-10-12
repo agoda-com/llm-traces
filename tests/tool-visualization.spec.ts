@@ -1,5 +1,8 @@
 import { test, expect } from '@playwright/test';
 import {
+  ADK_SEARCH_RESPONSE,
+  ADK_TRACE_RESPONSE,
+  ADK_UNCAPTURED_TRACE_RESPONSE,
   DEEP_NESTED_SEARCH_RESPONSE,
   DEEP_NESTED_TRACE_RESPONSE,
   TOOL_VISUALIZATION_SEARCH_RESPONSE,
@@ -253,5 +256,123 @@ test.describe('Tool visualization', () => {
     expect(metrics.lineCount).toBe(1);
     expect(metrics.width).toBeGreaterThanOrEqual(112);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  });
+});
+
+test.describe('Google ADK spans', () => {
+  test.beforeEach(async ({ page, context }) => {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await page.route('**/api/datasources/proxy/uid/**/api/search**', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(ADK_SEARCH_RESPONSE) });
+    });
+    await page.route('**/api/datasources/proxy/uid/**/api/traces/**', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(ADK_TRACE_RESPONSE) });
+    });
+    await page.goto(PLUGIN_URL);
+    await page.getByTestId('trace-explorer').waitFor();
+    await page.locator('[data-testid^="trace-item-"]').first().click();
+    await expect(page.getByTestId('llm-span-detail')).toBeVisible();
+  });
+
+  test('shows a call_llm span with an LLM badge, system and user messages, tool cards, output and tool catalog', async ({ page }) => {
+    await expect(page.getByTestId('llm-span-kind')).toHaveText('LLM');
+    await expect(page.getByTestId('llm-model-name')).toHaveText('gemini-2.5-flash');
+
+    const input = page.getByTestId('input-messages-section');
+    const system = input.getByTestId('message-block-system');
+    await expect(system).toContainText('You are a trip planning assistant.');
+    await expect(system).toContainText('Café or Zürich');
+    await expect(system).toContainText('Sample code point: A.');
+    await expect(input.getByTestId('message-block-user').first()).toContainText('Find me a flight from Paris to Rome. Destination note: 英語');
+    await expect(input.getByTestId('message-block-ag-context')).toContainText('Traveler prefers morning departures.');
+
+    const call = input.getByTestId('message-part-tool_call');
+    await expect(call.getByText('search_flights', { exact: true })).toBeVisible();
+    await expect(call.getByText('FCO', { exact: false })).toBeVisible();
+    const result = input.getByTestId('message-part-tool_result');
+    await expect(result.getByText('search_flights', { exact: true })).toBeVisible();
+    await expect(result.getByText('FL100', { exact: false })).toBeVisible();
+    await expect(page.getByTestId('tool-correlation-chip').filter({ hasText: 'adk-call-1' })).toHaveCount(2);
+
+    await expect(page.getByTestId('output-section').getByTestId('message-block-model')).toContainText('You are all set for FL100.');
+
+    const catalog = page.getByTestId('available-tools-section');
+    await expect(catalog.getByText('Available Tools (2)', { exact: true })).toBeVisible();
+    await catalog.getByRole('button', { name: 'Available Tools (2)' }).click();
+    await expect(catalog.getByText('search_flights', { exact: true })).toBeVisible();
+    await expect(catalog.getByText('book_flight', { exact: true })).toBeVisible();
+  });
+
+  test('lists the request and response attributes as shown above', async ({ page }) => {
+    const toggle = page.getByTestId('llm-attrs-toggle');
+    await expect(toggle).toBeVisible();
+    await expect(page.getByTestId('span-attrs-table').getByText('gcp.vertex.agent.llm_request', { exact: true })).toHaveCount(0);
+    await toggle.click();
+    await expect(page.getByTestId('span-attrs-table').getByText('gcp.vertex.agent.llm_request', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('span-attrs-table').getByText('gcp.vertex.agent.llm_response', { exact: true })).toBeVisible();
+  });
+
+  test('shows an empty state when the model returned an empty text part', async ({ page }) => {
+    await page.getByTestId('span-row-adkspan0004').click();
+    const output = page.getByTestId('output-section');
+    await expect(output.getByTestId('message-block-model')).toBeVisible();
+    await expect(output.getByText('(empty)')).toBeVisible();
+  });
+
+  test('shows an execute_tool span as a tool call and a tool result', async ({ page }) => {
+    await page.getByTestId('span-row-adkspan0003').click();
+    await expect(page.getByTestId('llm-span-kind')).toHaveText('TOOL');
+    const input = page.getByTestId('input-messages-section');
+    await expect(input.getByTestId('message-part-tool_call').getByText('search_flights', { exact: true })).toBeVisible();
+    await expect(input.getByTestId('message-part-tool_call').getByText('CDG', { exact: false })).toBeVisible();
+    const output = page.getByTestId('output-section');
+    await expect(output.getByTestId('message-part-tool_result').getByText('FL100', { exact: false })).toBeVisible();
+    await expect(page.getByTestId('tool-correlation-chip').filter({ hasText: 'adk-call-1' })).toHaveCount(2);
+  });
+
+  test('counts only model calls as LLM spans in the trace summary', async ({ page }) => {
+    await expect(page.getByTestId('llm-span-count')).toHaveText('2');
+  });
+});
+
+test.describe('Google ADK spans without captured content', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route('**/api/datasources/proxy/uid/**/api/search**', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(ADK_SEARCH_RESPONSE) });
+    });
+    await page.route('**/api/datasources/proxy/uid/**/api/traces/**', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(ADK_UNCAPTURED_TRACE_RESPONSE) });
+    });
+    await page.goto(PLUGIN_URL);
+    await page.getByTestId('trace-explorer').waitFor();
+    await page.locator('[data-testid^="trace-item-"]').first().click();
+    await expect(page.getByTestId('llm-span-detail')).toBeVisible();
+  });
+
+  test('explains that message content was not captured and still shows model and token usage', async ({ page }) => {
+    const notice = page.getByTestId('content-notice');
+    await expect(notice).toHaveCount(1);
+    await expect(notice).toHaveText('Message content was not captured for this span (ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS is disabled).');
+    await expect(page.getByTestId('input-messages-section')).toHaveCount(0);
+    await expect(page.getByTestId('llm-model-name')).toHaveText('gemini-2.5-flash');
+    await expect(page.getByTestId('llm-span-kind')).toHaveText('LLM');
+    await expect(page.getByTestId('params-section').getByText('420', { exact: true })).toBeVisible();
+  });
+
+  test('explains the same for an execute_tool span without tool cards', async ({ page }) => {
+    await page.getByTestId('span-row-adkspan0003').click();
+    await expect(page.getByTestId('llm-span-kind')).toHaveText('TOOL');
+    await expect(page.getByTestId('content-notice')).toHaveText('Message content was not captured for this span (ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS is disabled).');
+    await expect(page.getByTestId('message-part-tool_call')).toHaveCount(0);
+    await expect(page.getByTestId('message-part-tool_result')).toHaveCount(0);
+  });
+
+  test('explains when ADK could not serialize the request or response', async ({ page }) => {
+    await page.getByTestId('span-row-adkspan0004').click();
+    const notices = page.getByTestId('content-notice');
+    await expect(notices).toHaveCount(2);
+    await expect(notices.nth(0)).toHaveText('ADK could not serialize the request for this span.');
+    await expect(notices.nth(1)).toHaveText('ADK could not serialize the response for this span.');
+    await expect(page.getByTestId('llm-model-name')).toHaveText('gemini-2.5-flash');
   });
 });
