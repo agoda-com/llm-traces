@@ -18,6 +18,7 @@ import {
   tempoQueryToTraceQL,
 } from '../utils/queryBuilder';
 import { formatDuration, formatTime } from '../utils/formatUtils';
+import { scrollWithinContainer } from '../utils/scrollUtils';
 import { useDatasource } from '../hooks/useDatasource';
 import { useOpenTrace } from '../hooks/useOpenTrace';
 import { useTraceSearch } from '../hooks/useTraceSearch';
@@ -200,7 +201,9 @@ export function TraceExplorer() {
   // BUG-059: scroll the selected trace item into view after the list renders
   useEffect(() => {
     if (selectedTraceId) {
-      document.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
+      const item = document.querySelector('[aria-selected="true"]');
+      const pane = item?.closest('[data-testid="trace-list-pane"]');
+      if (item && pane) { scrollWithinContainer(item, pane); }
     }
   }, [selectedTraceId, traces]);
 

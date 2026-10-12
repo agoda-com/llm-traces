@@ -41,12 +41,28 @@ export interface TempoLikeQuery {
   [key: string]: unknown;
 }
 
-/** Returns true if the string looks like a bare trace ID (exactly 16 or 32 hex chars). */
+/**
+ * Returns true if the string looks like a bare trace ID: 16 to 32 hex chars and nothing else.
+ * Tempo trims leading zeros from the IDs it returns, so 30 or 31 chars is valid; Tempo accepts the trimmed form when fetching.
+ */
 export function looksLikeTraceId(s: string): boolean {
-  return /^([0-9a-f]{16}|[0-9a-f]{32})$/i.test(s.trim());
+  return /^[0-9a-f]{16,32}$/i.test(s.trim());
 }
 
 export type TempoFilter = NonNullable<TempoLikeQuery['filters']>[0];
+
+// Tempo type-checks intrinsics: status=error and kind=server take bare enum literals, duration>5s takes a
+// bare duration literal, and the quoted forms are rejected with "binary operations must operate on the same type".
+const ENUM_INTRINSICS = new Map<string, string[]>([
+  ['status', ['error', 'ok', 'unset']],
+  ['kind', ['server', 'client', 'producer', 'consumer', 'internal', 'unspecified']],
+]);
+const DURATION_INTRINSICS = new Set(['duration', 'traceDuration']);
+const STRING_INTRINSICS = new Set(['name', 'statusMessage', 'rootName', 'rootServiceName']);
+const DURATION_PATTERN = /^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+$/;
+const NUMBER_PATTERN = /^-?\d+(\.\d+)?$/;
+const REGEX_OPERATORS = new Set(['=~', '!~']);
+const ORDER_OPERATORS = new Set(['>', '>=', '<', '<=']);
 
 /** Convert a single Tempo search filter to a TraceQL condition. */
 export function filterToCondition(f: TempoFilter): string | null {
@@ -63,25 +79,49 @@ export function filterToCondition(f: TempoFilter): string | null {
   const rawVals: string[] = (Array.isArray(f.value) ? f.value : (f.value !== undefined ? [f.value] : []))
     .filter((v): v is string => v !== undefined && v !== null);
 
+  const enumValues = ENUM_INTRINSICS.get(f.tag);
+  const isDuration = DURATION_INTRINSICS.has(f.tag);
+  const isStringIntrinsic = STRING_INTRINSICS.has(f.tag);
+
   // != with empty/missing value → "attribute exists" condition (e.g. span.kind != "")
   // The QueryEditor normalises value:[''] to value:[] so rawVals may be [] or [''] here.
   if (op === '!=' && (rawVals.length === 0 || rawVals.every((v) => v === ''))) {
-    return `${attr}!=""`;
+    // Enums and durations always exist and cannot be compared with ""
+    return enumValues || isDuration ? null : `${attr}!=""`;
   }
 
   const nonEmpty = rawVals.filter((v) => v !== '');
-  if (nonEmpty.length === 0) { return null; }
 
   // Escape backslashes and double quotes in attribute values (BUG-013)
   const escape = (v: string) => v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
-  // Multiple values: emit an OR group
-  if (nonEmpty.length > 1) {
-    const conditions = nonEmpty.map((v) => `${attr}${op}"${escape(v)}"`);
-    return `(${conditions.join(' || ')})`;
-  }
+  // Values Tempo would reject (unknown enum member, malformed duration) produce no condition, not a broken query.
+  const toCondition = (v: string): string | null => {
+    const trimmed = v.trim();
+    if (enumValues) {
+      const member = trimmed.toLowerCase();
+      return enumValues.includes(member) && (op === '=' || op === '!=') ? `${attr}${op}${member}` : null;
+    }
+    if (isDuration) {
+      return DURATION_PATTERN.test(trimmed) && !REGEX_OPERATORS.has(op) ? `${attr}${op}${trimmed}` : null;
+    }
+    const quoted = `${attr}${op}"${escape(v)}"`;
+    if (!NUMBER_PATTERN.test(trimmed) || isStringIntrinsic || REGEX_OPERATORS.has(op)) {
+      return quoted;
+    }
+    if (ORDER_OPERATORS.has(op)) { return `${attr}${op}${trimmed}`; }
+    // The attribute type is only known to Tempo: `=200` matches an integer attribute, `="200"` a string one.
+    if (op === '=') { return `(${attr}=${trimmed} || ${quoted})`; }
+    // `!=` stays quoted: comparing an integer attribute with a string literal is false in TraceQL, so
+    // adding `!=200` as well would drop integer attributes that differ from 200.
+    return quoted;
+  };
 
-  return `${attr}${op}"${escape(nonEmpty[0])}"`;
+  const conditions = nonEmpty.map(toCondition).filter((c): c is string => c !== null);
+  if (conditions.length === 0) { return null; }
+
+  // Multiple values: emit an OR group
+  return conditions.length > 1 ? `(${conditions.join(' || ')})` : conditions[0];
 }
 
 /**

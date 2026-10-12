@@ -1,5 +1,9 @@
-/** Format a duration in milliseconds as a human-readable string. */
-export function formatDuration(ms: number): string {
+/**
+ * Format a duration in milliseconds as a human-readable string.
+ * Tempo omits durationMs from search results for sub-millisecond traces, so a missing value renders as "<1ms".
+ */
+export function formatDuration(ms: number | undefined): string {
+  if (ms === undefined || Number.isNaN(ms)) { return '<1ms'; }
   if (ms < 1) { return `${(ms * 1000).toFixed(0)}µs`; }
   if (ms < 1000) { return `${ms.toFixed(0)}ms`; }
   return `${(ms / 1000).toFixed(2)}s`;

@@ -9,6 +9,7 @@ import { PluginSpan, flattenTree, getTraceDurationMs, getTraceStartMs } from '..
 import { isLlmSpan, isGuardrailSpan, isAiSpan, extractLlmSpanData } from '../utils/llmUtils';
 import { estimateCost, formatCost } from '../utils/costUtils';
 import { formatDuration } from '../utils/formatUtils';
+import { scrollWithinContainer } from '../utils/scrollUtils';
 import { SpanRow } from './SpanRow';
 import { SpanDetailPanel } from './SpanDetailPanel';
 
@@ -106,7 +107,8 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
     if (!selectedSpanId) { return; }
     const container = containerRef.current;
     const el = (container ?? document).querySelector(`[data-testid="span-row-${selectedSpanId}"]`);
-    if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+    const pane = el?.closest('[data-testid="span-list-pane"]');
+    if (el && pane) { scrollWithinContainer(el, pane, 'smooth'); }
   }, [selectedSpanId]);
 
   const flatSpans = useMemo(() => spans ? flattenTree(spans) : [], [spans]);
@@ -201,14 +203,14 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
   // immediately when a trace detail panel opens, without requiring a click inside the panel.
   // BUG-026: use useLayoutEffect so focus is set synchronously before the browser paints,
   // ensuring that keyboard events received immediately after render find the container focused.
-  useLayoutEffect(() => { containerRef.current?.focus(); }, []);
+  useLayoutEffect(() => { containerRef.current?.focus({ preventScroll: true }); }, []);
 
   // Re-focus the container when a trace finishes loading so keyboard nav works immediately
   // after clicking a trace item. The trace item in the list captures focus on click, so without
   // this the BUG-026 guard would block j/k/Arrow events (focus outside our container).
   useLayoutEffect(() => {
     if (!loading && spans && spans.length > 0) {
-      containerRef.current?.focus();
+      containerRef.current?.focus({ preventScroll: true });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [traceId, loading]);

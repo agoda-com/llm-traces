@@ -50,7 +50,7 @@ export function TraceSummaryBar({ traces }: TraceSummaryBarProps) {
   if (traces.length === 0) { return null; }
 
   const services = new Set(traces.map((t) => t.rootServiceName).filter(Boolean));
-  const durations = traces.map((t) => t.durationMs).filter((d) => !isNaN(d) && isFinite(d)).sort((a, b) => a - b);
+  const durations = traces.map((t) => t.durationMs ?? 0).filter((d) => !isNaN(d) && isFinite(d)).sort((a, b) => a - b);
   const avgDuration = durations.length > 0 ? durations.reduce((s, d) => s + d, 0) / durations.length : 0;
   const p95Index = durations.length > 0 ? Math.min(Math.ceil(durations.length * 0.95) - 1, durations.length - 1) : 0;
   const p95Duration = durations.length > 0 ? (durations[p95Index] ?? durations[durations.length - 1]) : 0;

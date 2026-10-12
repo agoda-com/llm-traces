@@ -663,6 +663,33 @@ test.describe('SpanRow and TraceSummaryBar bug fixes', () => {
     expect(barText ?? '', 'TraceSummaryBar contains NaN (BUG-035)').not.toContain('NaN');
     expect(barText ?? '', 'TraceSummaryBar contains Infinity (BUG-035)').not.toContain('Infinity');
   });
+
+  // Tempo omits durationMs for sub-millisecond traces.
+  test('trace list shows "<1ms" instead of NaN when a trace has no durationMs', async ({ page }) => {
+    const { durationMs: _omitted, ...traceWithoutDuration } = SEARCH_RESPONSE.traces[0];
+    await mockTempoWithCapture(page, TRACE_RESPONSE, { traces: [traceWithoutDuration] });
+    await page.goto(PLUGIN_URL);
+    await waitForTraces(page);
+
+    const item = page.getByTestId(`trace-item-${traceWithoutDuration.traceID}`);
+    await expect(item).toContainText('<1ms');
+    await expect(item).not.toContainText('NaN');
+  });
+
+  // Tempo trims leading zeros from the trace IDs it returns, so users paste 31-character IDs.
+  test('pasting a trace ID with trimmed leading zeros fetches that trace', async ({ page }) => {
+    const trimmedId = '123456789abcdef0123456789abcdef';
+    const { traceUrls } = await mockTempoWithCapture(page);
+    await page.goto(PLUGIN_URL);
+    await waitForTraces(page);
+
+    const textarea = page.locator('[data-testid="trace-explorer"] textarea').first();
+    await textarea.click({ clickCount: 3 });
+    await textarea.fill(trimmedId);
+    await page.getByTestId('trace-explorer').getByRole('button', { name: /search/i }).first().click();
+
+    await expect.poll(() => traceUrls.some((url) => url.pathname.endsWith(`/api/traces/${trimmedId}`))).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

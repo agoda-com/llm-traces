@@ -282,10 +282,11 @@ function normalizeMessagePart(raw: unknown): LlmMessagePart {
   if (type === 'text' || (!type && part.text !== undefined)) {
     return { type: 'text', text: stringifyValue(part.text ?? part.content ?? '') };
   }
-  if (type === 'reasoning') {
+  // OTel GenAI defines `reasoning`; some instrumentations emit Anthropic-style `thinking` parts instead.
+  if (type === 'reasoning' || type === 'thinking') {
     return {
       type: 'reasoning',
-      text: stringifyValue(part.text ?? part.content ?? ''),
+      text: stringifyValue(part.text ?? part.content ?? part.thinking ?? ''),
       value: part,
     };
   }

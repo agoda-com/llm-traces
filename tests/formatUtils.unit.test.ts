@@ -1,7 +1,7 @@
 // Unit tests for formatUtils.ts
 // Run with: node --experimental-strip-types tests/formatUtils.unit.test.ts
 
-import { formatCompactArray } from '../src/utils/formatUtils.ts';
+import { formatCompactArray, formatDuration } from '../src/utils/formatUtils.ts';
 
 let passed = 0;
 let failed = 0;
@@ -20,6 +20,15 @@ function describe(name: string, fn: () => void): void {
   console.log(`\n=== ${name} ===`);
   fn();
 }
+
+describe('formatDuration', () => {
+  assertEquals(formatDuration(undefined), '<1ms', 'missing duration (Tempo omits durationMs for sub-millisecond traces)');
+  assertEquals(formatDuration(NaN), '<1ms', 'NaN duration');
+  assertEquals(formatDuration(0), '0µs', 'zero duration');
+  assertEquals(formatDuration(0.25), '250µs', 'sub-millisecond duration');
+  assertEquals(formatDuration(42.4), '42ms', 'milliseconds');
+  assertEquals(formatDuration(1500), '1.50s', 'seconds');
+});
 
 describe('formatCompactArray', () => {
   assertEquals(

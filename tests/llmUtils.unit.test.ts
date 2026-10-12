@@ -1780,6 +1780,31 @@ describe('OTel GenAI native structured messages', () => {
   assertEquals(result.outputMessages[0]?.content, 'The weather is rainy.', 'OTel output text normalized');
 });
 
+describe('OTel GenAI reasoning and thinking parts render as reasoning', () => {
+  const tags: KeyValuePair[] = [
+    kv('gen_ai.system', 'anthropic'),
+    kv('gen_ai.request.model', 'claude-sonnet-4'),
+    kv('gen_ai.output.messages', [
+      {
+        role: 'assistant',
+        parts: [
+          { type: 'thinking', content: 'Check the weather tool first.' },
+          { type: 'reasoning', content: 'Then summarize.' },
+          { type: 'thinking', thinking: 'Anthropic-style field.', signature: 'sig' },
+          { type: 'text', content: 'It is rainy.' },
+        ],
+      },
+    ]),
+  ];
+
+  const message = extractLlmSpanData(tags, []).outputMessages[0];
+
+  assertDeepEquals(message?.parts?.map((part) => part.type), ['reasoning', 'reasoning', 'reasoning', 'text'], 'thinking and reasoning parts normalize to reasoning');
+  const reasoningTexts = message?.parts?.flatMap((part) => (part.type === 'reasoning' ? [part.text] : []));
+  assertDeepEquals(reasoningTexts, ['Check the weather tool first.', 'Then summarize.', 'Anthropic-style field.'], 'reasoning text comes from content or thinking');
+  assertEquals(message?.content, 'It is rainy.', 'reasoning text stays out of the message content');
+});
+
 describe('Vertex function parts preserve camel-case and snake-case variants', () => {
   const request = JSON.stringify({
     contents: [

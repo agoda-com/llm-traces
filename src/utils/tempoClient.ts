@@ -6,7 +6,7 @@ export interface TempoTraceSearchResult {
   rootServiceName: string;
   rootTraceName: string;
   startTimeUnixNano: string;
-  durationMs: number;
+  durationMs?: number;
   spanSets?: Array<{
     spans: Array<{
       spanID: string;
