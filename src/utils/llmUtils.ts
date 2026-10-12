@@ -239,14 +239,17 @@ function extractOpenInferenceToolDefinitions(tags: KeyValuePair[]): LlmToolDefin
   return definitions.sort((left, right) => left.index - right.index);
 }
 
-function extractOtelToolDefinitions(tags: KeyValuePair[]): LlmToolDefinition[] {
-  const raw = getRawAttr(tags, 'gen_ai.tool.definitions');
+function toolDefinitionsFromValue(raw: unknown): LlmToolDefinition[] {
   if (raw === undefined || raw === null) {
     return [];
   }
   const parsed = parseJsonValue(raw);
   const definitions = Array.isArray(parsed) ? parsed : [parsed];
   return definitions.map(normalizeToolDefinition);
+}
+
+function extractOtelToolDefinitions(tags: KeyValuePair[]): LlmToolDefinition[] {
+  return toolDefinitionsFromValue(getRawAttr(tags, 'gen_ai.tool.definitions'));
 }
 
 function extractVertexToolDefinitions(jsonBlob: string | undefined): LlmToolDefinition[] {
@@ -516,31 +519,117 @@ function tryExtractMessages(content: string): LlmMessage[] {
   return parsed;
 }
 
-function extractMessagesFromEvents(logs: SpanLog[]): { input: LlmMessage[]; output: LlmMessage[] } {
+const GEN_AI_INPUT_EVENT_ROLES: Record<string, string> = {
+  'gen_ai.system.message': 'system',
+  'gen_ai.user.message': 'user',
+  'gen_ai.assistant.message': 'assistant',
+  'gen_ai.tool.message': 'tool',
+};
+
+function eventRecord(fields: KeyValuePair[]): Record<string, unknown> {
+  const record: Record<string, unknown> = Object.create(null);
+  for (const field of fields) {
+    record[field.key] = field.value;
+  }
+  return record;
+}
+
+// gen_ai.system_instructions holds the system prompt separately from the chat history. It is an array
+// of parts (the semconv shape), a single part, or plain text. It is only added when the history has no
+// system message, so instrumentations that also repeat it in the history are not shown twice.
+function withSystemInstructions(messages: LlmMessage[], instructions: unknown): LlmMessage[] {
+  if (instructions === undefined || instructions === null || instructions === '') {
+    return messages;
+  }
+  if (messages.some((message) => message.role === 'system')) {
+    return messages;
+  }
+  const looksLikeJson = typeof instructions === 'string' && /^\s*[[{]/.test(instructions);
+  const parsed = looksLikeJson ? parseJsonValue(instructions) : instructions;
+  const partList = Array.isArray(parsed) ? parsed : isRecord(parsed) ? [parsed] : undefined;
+  if (!partList) {
+    return [{ role: 'system', content: stringifyValue(parsed) }, ...messages];
+  }
+  const parts = partList.map((part) => (typeof part === 'string' ? { type: 'text', text: part } : part));
+  const message = normalizeMessage({ role: 'system', parts }, 'system');
+  if (!message) {
+    return messages;
+  }
+  const text = (message.parts ?? []).flatMap((part) => (part.type === 'text' ? [part.text] : []));
+  return [{ ...message, content: text.join('\n') }, ...messages];
+}
+
+function inputMessagesFromEvent(eventName: string, record: Record<string, unknown>): LlmMessage[] {
+  const defaultRole = GEN_AI_INPUT_EVENT_ROLES[eventName] ?? 'user';
+  const legacyText = record['gen_ai.prompt'] ?? record['gen_ai.content'];
+  const content = legacyText ?? record.content ?? undefined;
+  // Older instrumentations put a whole JSON message list in the prompt of a user event.
+  if (defaultRole === 'user' && typeof content === 'string') {
+    const listed = tryExtractMessages(content);
+    if (listed.length > 0) {
+      return listed;
+    }
+  }
+  const message = normalizeMessage(
+    {
+      role: record.role ?? defaultRole,
+      content,
+      tool_calls: record.tool_calls,
+      tool_call_id: record.id ?? record.tool_call_id,
+    },
+    defaultRole
+  );
+  return message && (message.content || message.toolCalls || message.parts?.length) ? [message] : [];
+}
+
+function outputMessageFromChoice(record: Record<string, unknown>): LlmMessage | undefined {
+  const message = parseJsonValue(record.message);
+  const source: Record<string, unknown> = isRecord(message) ? { ...message } : { role: 'assistant', content: message };
+  if (source.tool_calls === undefined || source.tool_calls === null) {
+    source.tool_calls = record.tool_calls;
+  }
+  // Tool-calling responses carry content: null, which is no text rather than the text "null".
+  if (source.content === null) {
+    delete source.content;
+  }
+  return normalizeMessage(source, 'assistant');
+}
+
+interface EventMessages {
+  input: LlmMessage[];
+  output: LlmMessage[];
+  tools: LlmToolDefinition[];
+  finishReason?: string;
+}
+
+function extractMessagesFromEvents(logs: SpanLog[]): EventMessages {
   // Collect system messages separately so they can be prepended (system must come first per LLM API convention)
   const systemMessages: LlmMessage[] = [];
   const nonSystemInput: LlmMessage[] = [];
-  // For gen_ai.choice streaming: accumulate by choice index
-  const choiceAccumulator: Map<number, { content: string }> = new Map();
+  // gen_ai.choice events are grouped by choice index. Streaming instrumentations send the text in chunks.
+  const choices: Map<number, { text: string; messages: LlmMessage[] }> = new Map();
   const output: LlmMessage[] = [];
+  let details: { input: LlmMessage[]; output: LlmMessage[]; instructions: unknown } | undefined;
+  let tools: LlmToolDefinition[] = [];
+  let finishReason: string | undefined;
   for (const log of logs) {
     const eventName = log.name || getAttr(log.fields, 'event') || '';
-    if (eventName === 'gen_ai.content.prompt' || eventName === 'gen_ai.user.message') {
-      const content = getAttr(log.fields, 'gen_ai.prompt') || getAttr(log.fields, 'gen_ai.content') || '';
-      const rawContent = getRawStringAttr(log.fields, 'gen_ai.prompt') || getRawStringAttr(log.fields, 'gen_ai.content') || '';
-      const role = getAttr(log.fields, 'role') || 'user';
-      const parsed = tryExtractMessages(rawContent);
-      if (parsed.length > 0) {
-        nonSystemInput.push(...parsed);
-      } else if (content) {
-        nonSystemInput.push({ role, content });
+    const record = eventRecord(log.fields);
+    if (eventName === 'gen_ai.client.inference.operation.details') {
+      details = {
+        input: extractMessagesFromValue(record['gen_ai.input.messages'] ?? record['gen_ai.input_messages']),
+        output: extractMessagesFromValue(record['gen_ai.output.messages'] ?? record['gen_ai.output_messages']),
+        instructions: record['gen_ai.system_instructions'],
+      };
+      tools = toolDefinitionsFromValue(record['gen_ai.tool.definitions']);
+    } else if (eventName === 'gen_ai.content.prompt' || eventName in GEN_AI_INPUT_EVENT_ROLES) {
+      const messages = inputMessagesFromEvent(eventName, record);
+      if (eventName === 'gen_ai.system.message') {
+        systemMessages.push(...messages);
+      } else {
+        nonSystemInput.push(...messages);
       }
-    } else if (eventName === 'gen_ai.system.message') {
-      const content = getAttr(log.fields, 'gen_ai.content') || getAttr(log.fields, 'gen_ai.prompt') || '';
-      if (content) {
-        systemMessages.push({ role: 'system', content });
-      }
-    } else if (eventName === 'gen_ai.content.completion' || eventName === 'gen_ai.assistant.message') {
+    } else if (eventName === 'gen_ai.content.completion') {
       const content = getAttr(log.fields, 'gen_ai.completion') || getAttr(log.fields, 'gen_ai.content') || '';
       const rawContent = getRawStringAttr(log.fields, 'gen_ai.completion') || getRawStringAttr(log.fields, 'gen_ai.content') || '';
       const parsed = tryExtractMessages(rawContent);
@@ -550,30 +639,42 @@ function extractMessagesFromEvents(logs: SpanLog[]): { input: LlmMessage[]; outp
         output.push({ role: 'assistant', content });
       }
     } else if (eventName === 'gen_ai.choice') {
-      const content = getRawStringAttr(log.fields, 'gen_ai.completion') || getRawStringAttr(log.fields, 'gen_ai.content') || '';
-      const choiceIndexRaw = getAttr(log.fields, 'gen_ai.choice.index');
-      const choiceIndex = choiceIndexRaw !== undefined ? parseInt(choiceIndexRaw, 10) : 0;
-      const existing = choiceAccumulator.get(choiceIndex);
-      if (existing) {
-        existing.content += content;
+      const indexValue = Number(record.index ?? record['gen_ai.choice.index'] ?? 0);
+      const choiceIndex = Number.isNaN(indexValue) ? 0 : indexValue;
+      const choice = choices.get(choiceIndex) ?? { text: '', messages: [] };
+      choices.set(choiceIndex, choice);
+      if (record.message !== undefined || record.tool_calls !== undefined) {
+        const message = outputMessageFromChoice(record);
+        if (message) {
+          choice.messages.push(message);
+        }
       } else {
-        choiceAccumulator.set(choiceIndex, { content });
+        choice.text += getRawStringAttr(log.fields, 'gen_ai.completion') || getRawStringAttr(log.fields, 'gen_ai.content') || getRawStringAttr(log.fields, 'content') || '';
       }
+      finishReason ??= typeof record.finish_reason === 'string' && record.finish_reason ? record.finish_reason : undefined;
     }
   }
-  // Flush accumulated choice chunks as output messages
-  if (choiceAccumulator.size > 0) {
-    for (const [, chunk] of Array.from(choiceAccumulator.entries()).sort(([a], [b]) => a - b)) {
-      const parsed = tryExtractMessages(chunk.content);
-      if (parsed.length > 0) {
-        output.push(...parsed);
-      } else if (chunk.content) {
-        output.push({ role: 'assistant', content: decodeUnicodeEscapes(chunk.content) });
-      }
+  for (const [, choice] of Array.from(choices.entries()).sort(([a], [b]) => a - b)) {
+    output.push(...choice.messages);
+    const parsed = tryExtractMessages(choice.text);
+    if (parsed.length > 0) {
+      output.push(...parsed);
+    } else if (choice.text) {
+      output.push({ role: 'assistant', content: decodeUnicodeEscapes(choice.text) });
     }
+  }
+  if (details) {
+    // The details event is the complete record of the call and supersedes the per-message events.
+    const input = details.input.length > 0 ? details.input : [...systemMessages, ...nonSystemInput];
+    return {
+      input: withSystemInstructions(input, details.instructions),
+      output: details.output.length > 0 ? details.output : output,
+      tools,
+      finishReason,
+    };
   }
   // System messages always appear first in the conversation
-  return { input: [...systemMessages, ...nonSystemInput], output };
+  return { input: [...systemMessages, ...nonSystemInput], output, tools, finishReason };
 }
 
 function extractGcpVertexRequestMessages(jsonBlob: string): LlmMessage[] {
@@ -819,6 +920,7 @@ function extractOpenInference(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSp
     inputMessages = fromEvents.input;
     outputMessages = fromEvents.output;
   }
+  inputMessages = withSystemInstructions(inputMessages, getRawAttr(tags, 'gen_ai.system_instructions'));
   let invocationParams: LlmInvocationParams = {};
   const invParamsStr = getRawStringAttr(tags, 'llm.invocation_parameters');
   if (invParamsStr) {
@@ -878,7 +980,9 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
   // Prefer gen_ai.response.model when present — after streaming/routing the served model may differ
   // from the requested model (e.g. provider-side aliasing or fallback routing).
   const model = getAttr(tags, 'gen_ai.response.model') || getAttr(tags, 'gen_ai.request.model') || getAttr(tags, 'llm.request.model') || 'unknown';
-  const { input: inputMessages, output: outputMessages } = extractMessagesFromEvents(logs);
+  const fromEvents = extractMessagesFromEvents(logs);
+  let inputMessages = fromEvents.input;
+  const outputMessages = fromEvents.output;
   if (inputMessages.length === 0) {
     const prompt = getAttr(tags, 'gen_ai.prompt');
     if (prompt) {
@@ -913,6 +1017,7 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
     // Traceloop flat-indexed format: gen_ai.completion.{i}.role / gen_ai.completion.{i}.content
     outputMessages.push(...extractIndexedMessages(tags, 'gen_ai.completion.'));
   }
+  inputMessages = withSystemInstructions(inputMessages, getRawAttr(tags, 'gen_ai.system_instructions'));
   const finishReasonsRaw = getRawStringAttr(tags, 'gen_ai.response.finish_reasons');
   let finishReasonFromArray: string | undefined;
   if (finishReasonsRaw) {
@@ -923,15 +1028,17 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
   }
   const finishReason = getAttr(tags, 'gen_ai.response.finish_reasons.0')
     ?? finishReasonFromArray
-    ?? getAttr(tags, 'gen_ai.finish_reason');
+    ?? getAttr(tags, 'gen_ai.finish_reason')
+    ?? fromEvents.finishReason;
   const precomputedCostUsd = getNumAttr(tags, 'gen_ai.cost.total_cost');
+  const attributeTools = extractOtelToolDefinitions(tags);
   return {
     convention: 'otel-genai',
     model,
     system: getAttr(tags, 'gen_ai.system'),
     inputMessages,
     outputMessages,
-    tools: extractOtelToolDefinitions(tags),
+    tools: attributeTools.length > 0 ? attributeTools : fromEvents.tools,
     tokenUsage: {
       input: getNumAttr(tags, 'gen_ai.usage.input_tokens') ?? getNumAttr(tags, 'gen_ai.usage.prompt_tokens'),
       output: getNumAttr(tags, 'gen_ai.usage.output_tokens') ?? getNumAttr(tags, 'gen_ai.usage.completion_tokens'),
@@ -1109,7 +1216,7 @@ export function getLlmDisplayAttributeKeys(
 
   if (data.convention === 'openinference' || data.convention === 'vertex') {
     if (data.inputMessages.length > 0) {
-      addExact('gen_ai.input.messages', 'gen_ai.input_messages', 'gcp.vertex.agent.llm_request', 'input.value');
+      addExact('gen_ai.input.messages', 'gen_ai.input_messages', 'gen_ai.system_instructions', 'gcp.vertex.agent.llm_request', 'input.value');
       addPrefixes('llm.input_messages.', 'llm.prompts.');
     }
     if (data.outputMessages.length > 0) {
@@ -1125,7 +1232,7 @@ export function getLlmDisplayAttributeKeys(
     }
   } else if (data.convention === 'otel-genai') {
     if (data.inputMessages.length > 0) {
-      addExact('gen_ai.prompt', 'gen_ai.input.messages', 'gen_ai.input_messages');
+      addExact('gen_ai.prompt', 'gen_ai.input.messages', 'gen_ai.input_messages', 'gen_ai.system_instructions');
       addPrefixes('gen_ai.prompt.');
     }
     if (data.outputMessages.length > 0) {

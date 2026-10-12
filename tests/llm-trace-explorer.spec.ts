@@ -1,6 +1,7 @@
 import { test, expect, Page } from '@playwright/test';
 import { SEARCH_RESPONSE, TRACE_RESPONSE, VERTEX_TRACE_RESPONSE, OTEL_GENAI_TRACE_RESPONSE, GENERIC_TRACE_RESPONSE, STRUCTURED_SEARCH_RESPONSE, STRUCTURED_TRACE_RESPONSE } from './fixtures/llm-trace';
 import { waitForToolbarLayout } from './waitForToolbarLayout';
+import { CONVENTION_SEARCH_RESPONSE, GENAI_EVENTS_TRACE } from './fixtures/conventions';
 
 const PLUGIN_URL = '/a/agoda-llmtraces-app';
 async function mockTempoApis(page: Page) {
@@ -1508,5 +1509,51 @@ test.describe('Share link', () => {
       (p) => Number(p.start) === expectedStart && Number(p.end) === expectedEnd
     );
     expect(match, `Expected a search with start=${expectedStart}&end=${expectedEnd}, got: ${JSON.stringify(searchParams)}`).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tracing conventions beyond OpenInference: synthetic traces from tests/fixtures/conventions.ts
+// ---------------------------------------------------------------------------
+
+async function openConventionTrace(page: Page, trace: unknown, spanId: string) {
+  await page.route('**/api/datasources/proxy/uid/**/api/search**', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(CONVENTION_SEARCH_RESPONSE) });
+  });
+  await page.route('**/api/datasources/proxy/uid/**/api/traces/**', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(trace) });
+  });
+  await page.goto(PLUGIN_URL);
+  await page.waitForSelector('[data-testid="trace-explorer"]');
+  await page.click('[data-testid^="trace-item-"]');
+  await page.getByTestId(`span-row-${spanId}`).click();
+}
+
+test.describe('OTel GenAI events and newest semantic conventions', () => {
+  test('span events render system, user, tool call, tool result and choice', async ({ page }) => {
+    await openConventionTrace(page, GENAI_EVENTS_TRACE, 'evspan0000000001');
+    const input = page.getByTestId('input-messages-section');
+    await expect(input.getByText('You answer weather questions.')).toBeVisible();
+    await expect(input.getByText('Weather in Paris?')).toBeVisible();
+    await expect(input.getByTestId('message-part-tool_call')).toContainText('get_weather');
+    await expect(input.getByTestId('message-part-tool_result')).toContainText('Sunny, 22C');
+    await expect(page.getByTestId('output-section').getByText('It is sunny in Paris today.')).toBeVisible();
+    await expect(page.getByTestId('llm-span-detail').getByText('STOP')).toBeVisible();
+  });
+
+  test('gen_ai.system_instructions is shown as a system message', async ({ page }) => {
+    await openConventionTrace(page, GENAI_EVENTS_TRACE, 'evspan0000000002');
+    const input = page.getByTestId('input-messages-section');
+    await expect(input.getByTestId('message-block-system')).toContainText('Always answer in one sentence.');
+    await expect(input.getByText('Is it raining in Rome?')).toBeVisible();
+    await expect(page.getByTestId('output-section').getByText('No, it is dry in Rome.')).toBeVisible();
+  });
+
+  test('the operation details event provides messages and system instructions', async ({ page }) => {
+    await openConventionTrace(page, GENAI_EVENTS_TRACE, 'evspan0000000003');
+    const input = page.getByTestId('input-messages-section');
+    await expect(input.getByTestId('message-block-system')).toContainText('Reply with a single word.');
+    await expect(input.getByText('Capital of Italy?')).toBeVisible();
+    await expect(page.getByTestId('output-section').getByText('Rome')).toBeVisible();
   });
 });
