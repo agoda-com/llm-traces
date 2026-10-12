@@ -3,7 +3,7 @@
   "compilerOptions": {
     "rootDir": ".",
     "baseUrl": "src",
-    "jsx": "react-jsx",
+    "jsx": "react",
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "types": ["node", "react", "react-dom"],

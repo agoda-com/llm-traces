@@ -43,6 +43,26 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Grafana 13 ships React 19. A bundled react/jsx-runtime (React 18 internals) crashes there,
+      # and an external react/jsx-runtime only exists in Grafana >= 12.3.0. The plugin must use the
+      # classic JSX transform so that `react` is its only React dependency.
+      - name: Bundle guard (React 18 and 19 compatibility)
+        run: |
+          deps=$(grep -m1 -o 'define(\[[^]]*\]' dist/module.js || true)
+          echo "AMD dependencies: $deps"
+          if [ -z "$deps" ]; then
+            echo "::error::No AMD define([...]) dependency list found in dist/module.js"
+            exit 1
+          fi
+          if echo "$deps" | grep -q 'react/jsx'; then
+            echo "::error::dist/module.js depends on react/jsx-runtime. Use the classic JSX transform (tsconfig jsx: react, no swc automatic runtime override)."
+            exit 1
+          fi
+          if grep -q -E 'ReactCurrentOwner|__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED|__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE' dist/module.js; then
+            echo "::error::dist/module.js contains React internals. Do not bundle react or react/jsx-runtime."
+            exit 1
+          fi
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: plugin-dist
@@ -72,10 +92,18 @@ jobs:
         run: scripts/validate-plugin.sh "$PLUGIN_ZIP"
 
   e2e:
-    name: E2E Tests
+    name: E2E Tests (Grafana ${{ matrix.grafana }})
     needs: ci
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # 11.3.0 is the grafanaDependency minimum in src/plugin.json (Grafana 11.1 and 11.2 scroll
+        # inside <main> instead of the window, which the plugin layout does not support).
+        # 12.0.0 is the oldest 12.x. 12.4.12 and 13.1.7 are the latest 12.x and 13.x patches.
+        # grafana/grafana-oss stopped publishing after 12.4.3 and 13.0.2, so grafana/grafana is used.
+        grafana: ['11.3.0', '12.0.0', '12.4.12', '13.1.7']
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -101,7 +129,7 @@ jobs:
             -e GF_AUTH_ANONYMOUS_ORG_ROLE=Admin \
             -e GF_DEFAULT_APP_MODE=development \
             -e GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=llm-traces-app \
-            grafana/grafana-oss:12.0.0
+            grafana/grafana:${{ matrix.grafana }}
           docker cp dist/. grafana:/var/lib/grafana/plugins/llm-traces-app/
           docker cp provisioning/plugins/. grafana:/etc/grafana/provisioning/plugins/
           docker cp provisioning/datasources/tempo.yaml grafana:/etc/grafana/provisioning/datasources/tempo.yaml
@@ -123,7 +151,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.grafana }}
           path: playwright-report/
           retention-days: 7
 

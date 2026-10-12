@@ -1,4 +1,4 @@
-import { ReactNode, useMemo, useState } from 'react';
+import React, { ReactNode, useMemo, useState } from 'react';
 
 import { useStyles2, Icon } from '@grafana/ui';
 import { getStyles } from './LlmSpanDetail.styles';

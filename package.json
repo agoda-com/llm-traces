@@ -58,11 +58,11 @@
     "webpack-virtual-modules": "^0.6.2"
   },
   "peerDependencies": {
-    "@grafana/data": ">=11.1.0",
-    "@grafana/runtime": ">=11.1.0",
-    "@grafana/ui": ">=11.1.0",
-    "react": "^18.0.0",
-    "react-dom": "^18.0.0"
+    "@grafana/data": ">=11.3.0",
+    "@grafana/runtime": ">=11.3.0",
+    "@grafana/ui": ">=11.3.0",
+    "react": "^18.0.0 || ^19.0.0",
+    "react-dom": "^18.0.0 || ^19.0.0"
   },
   "dependencies": {
     "@emotion/css": "11.13.5",

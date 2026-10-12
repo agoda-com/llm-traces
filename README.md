@@ -27,7 +27,7 @@ Supports multiple span conventions out of the box:
 
 | Component | Version |
 |-----------|---------|
-| Grafana | &ge; 11.1.0 |
+| Grafana | &ge; 11.3.0 |
 | Node.js | &ge; 22.6 (for development) |
 | A configured [Tempo](https://grafana.com/docs/tempo/latest/) datasource | |
 

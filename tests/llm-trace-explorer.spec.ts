@@ -1440,7 +1440,7 @@ test.describe('Share link', () => {
     await page.click('[data-testid^="trace-item-"]');
     await expect(page.getByTestId('trace-detail-view')).toBeVisible();
     // Go back to trace list
-    await page.getByRole('button', { name: /back/i }).click();
+    await page.getByTestId('trace-detail-view').getByRole('button', { name: /back/i }).click();
     await page.waitForTimeout(300);
     const url = new URL(page.url());
     expect(url.searchParams.get('llt-traceId')).toBeNull();
