@@ -14,7 +14,8 @@ export function useResize(initialPx: number, min: number, max: number) {
     (e: React.MouseEvent) => {
       e.preventDefault();
       const startX = e.clientX;
-      const startW = widthRef.current;
+      const resizedElement = e.currentTarget.previousElementSibling as HTMLElement | null;
+      const startW = resizedElement?.getBoundingClientRect().width ?? widthRef.current;
 
       const onMove = (ev: MouseEvent) => {
         setWidth(Math.max(min, Math.min(max, startW + ev.clientX - startX)));

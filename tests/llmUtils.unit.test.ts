@@ -3,6 +3,7 @@
 
 import {
   extractLlmSpanData,
+  getLlmDisplayAttributeKeys,
   isLlmSpan,
   isEmbeddingSpan,
   type KeyValuePair,
@@ -502,12 +503,17 @@ describe('extractIndexedMessages — tool role message', () => {
     kv('llm.input_messages.0.message.role', 'user'),
     kv('llm.input_messages.0.message.content', 'What is the weather?'),
     kv('llm.input_messages.1.message.role', 'tool'),
+    kv('llm.input_messages.1.message.name', 'get_weather'),
+    kv('llm.input_messages.1.message.tool_call_id', 'call_weather_1'),
     kv('llm.input_messages.1.message.content', '{"temperature": "22C", "condition": "sunny"}'),
   ];
 
   const result = extractLlmSpanData(tags, []);
   assertEquals(result.inputMessages[1].role, 'tool', 'tool role preserved');
   assert(result.inputMessages[1].content.includes('22C'), 'tool result content preserved');
+  assertEquals(result.inputMessages[1].parts?.[0].type, 'tool_result', 'tool content is normalized as a result part');
+  assertEquals(result.inputMessages[1].toolCallId, 'call_weather_1', 'responding tool call ID preserved');
+  assertEquals(result.inputMessages[1].name, 'get_weather', 'tool name preserved');
 });
 
 describe('extractIndexedMessages — short-form role/content keys', () => {
@@ -1483,8 +1489,9 @@ describe('BUG-081: extractGcpVertexResponseMessages includes functionCall parts'
   ];
   const result = extractLlmSpanData(tags, []);
   assertEquals(result.outputMessages.length, 1, 'one output message');
-  assert(result.outputMessages[0].content.includes('getWeather'), 'functionCall name is included in content');
-  assert(result.outputMessages[0].content.includes('Function call:'), 'functionCall prefix included');
+  assertEquals(result.outputMessages[0].content, '', 'function call is not duplicated as prose');
+  assertEquals(result.outputMessages[0].parts?.[0]?.type, 'tool_call', 'functionCall becomes a tool call part');
+  assertEquals(result.outputMessages[0].toolCalls?.[0]?.name, 'getWeather', 'functionCall name is preserved');
 });
 
 describe('BUG-081: extractGcpVertexRequestMessages includes functionResponse parts', () => {
@@ -1502,8 +1509,10 @@ describe('BUG-081: extractGcpVertexRequestMessages includes functionResponse par
   ];
   const result = extractLlmSpanData(tags, []);
   assertEquals(result.inputMessages.length, 1, 'one input message');
-  assert(result.inputMessages[0].content.includes('getWeather'), 'functionResponse name is included in content');
-  assert(result.inputMessages[0].content.includes('Function response:'), 'functionResponse prefix included');
+  assertEquals(result.inputMessages[0].content, '', 'function response is not duplicated as prose');
+  const responsePart = result.inputMessages[0].parts?.[0];
+  assertEquals(responsePart?.type, 'tool_result', 'functionResponse becomes a tool result part');
+  assertEquals(responsePart?.type === 'tool_result' ? responsePart.name : undefined, 'getWeather', 'functionResponse name is preserved');
 });
 
 // ---------------------------------------------------------------------------
@@ -1580,6 +1589,404 @@ describe('BUG-084: single-object message with content="" uses ?? (empty string k
   const result = extractLlmSpanData(tags, []);
   assertEquals(result.inputMessages.length, 1, 'message extracted');
   assertEquals(result.inputMessages[0].content, '', 'empty content kept with ??, not overridden by text');
+});
+
+// ---------------------------------------------------------------------------
+// Structured OpenInference messages
+// ---------------------------------------------------------------------------
+
+describe('OpenInference structured messages', () => {
+  const tags: KeyValuePair[] = [
+    kv('openinference.span.kind', 'LLM'),
+    kv('llm.model_name', 'claude-sonnet-4-5'),
+    kv('llm.input_messages.1.message.role', 'user'),
+    kv('llm.input_messages.1.message.contents.0.message_content.type', 'text'),
+    kv('llm.input_messages.1.message.contents.0.message_content.text', '## User - **Name:** example_user'),
+    kv('llm.input_messages.2.message.role', 'user'),
+    kv('llm.input_messages.2.message.contents.0.message_content.type', 'text'),
+    kv('llm.input_messages.2.message.contents.0.message_content.text', 'Please look into ticket PROJ-123'),
+    kv('llm.output_messages.0.message.role', 'assistant'),
+    kv('llm.output_messages.0.message.tool_calls.0.tool_call.id', 'tooluse_example0001'),
+    kv('llm.output_messages.0.message.tool_calls.0.tool_call.function.name', 'transfer_to_agent'),
+    kv('llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments', '{}'),
+  ];
+
+  const result = extractLlmSpanData(tags, []);
+
+  assertEquals(result.inputMessages[0].content, '## User - **Name:** example_user', 'first nested user text');
+  assertEquals(result.inputMessages[1].content, 'Please look into ticket PROJ-123', 'second nested user text');
+  assertEquals(result.inputMessages[0].parts?.[0].type, 'text', 'nested text remains an ordered part');
+  assertDeepEquals(result.outputMessages[0].toolCalls, [{
+    name: 'transfer_to_agent',
+    arguments: '{}',
+    id: 'tooluse_example0001',
+  }], 'flattened tool call is normalized');
+});
+
+describe('OpenInference dotted paths reject prototype-pollution keys', () => {
+  const tags: KeyValuePair[] = [
+    kv('openinference.span.kind', 'LLM'),
+    kv('llm.input_messages.0.message.role', 'user'),
+    kv('llm.input_messages.0.message.content', 'safe'),
+    kv('llm.input_messages.0.message.__proto__.polluted', 'yes'),
+  ];
+
+  const result = extractLlmSpanData(tags, []);
+
+  assertEquals(result.inputMessages[0].content, 'safe', 'safe fields survive a rejected path');
+  assertEquals(({} as Record<string, unknown>).polluted, undefined, 'Object prototype remains unchanged');
+});
+
+describe('OpenInference ordered multimodal content parts', () => {
+  const tags: KeyValuePair[] = [
+    kv('openinference.span.kind', 'LLM'),
+    kv('llm.input_messages.0.message.role', 'user'),
+    kv('llm.input_messages.0.message.contents.0.message_content.type', 'text'),
+    kv('llm.input_messages.0.message.contents.0.message_content.text', 'Describe this input.'),
+    kv('llm.input_messages.0.message.contents.1.message_content.type', 'image'),
+    kv('llm.input_messages.0.message.contents.1.message_content.image.image.url', 'https://example.com/input.png'),
+    kv('llm.output_messages.0.message.role', 'assistant'),
+    kv('llm.output_messages.0.message.contents.0.message_content.type', 'reasoning'),
+    kv('llm.output_messages.0.message.contents.0.message_content.text', 'Inspect the image.'),
+    kv('llm.output_messages.0.message.contents.1.message_content.type', 'audio'),
+    kv('llm.output_messages.0.message.contents.1.message_content.audio.audio.url', 'https://example.com/reply.wav'),
+  ];
+
+  const result = extractLlmSpanData(tags, []);
+
+  assertDeepEquals(result.inputMessages[0].parts?.map((part) => part.type), ['text', 'image'], 'input content-part order');
+  assertDeepEquals(result.outputMessages[0].parts?.map((part) => part.type), ['reasoning', 'audio'], 'output content-part order');
+  assertEquals(result.inputMessages[0].content, 'Describe this input.', 'only visible text contributes to scalar content');
+});
+
+describe('OpenInference ordered tool-use content items', () => {
+  const tags: KeyValuePair[] = [
+    kv('openinference.span.kind', 'LLM'),
+    kv('llm.output_messages.0.message.role', 'assistant'),
+    kv('llm.output_messages.0.message.contents.0.message_content.type', 'reasoning'),
+    kv('llm.output_messages.0.message.contents.0.message_content.text', 'I need the current weather.'),
+    kv('llm.output_messages.0.message.contents.1.message_content.type', 'tool_use'),
+    kv('llm.output_messages.0.message.contents.1.tool_call.id', 'call_weather_1'),
+    kv('llm.output_messages.0.message.contents.1.tool_call.function.name', 'get_weather'),
+    kv('llm.output_messages.0.message.contents.1.tool_call.function.arguments', '{"location":"Sydney"}'),
+    kv('llm.output_messages.0.message.contents.2.message_content.type', 'text'),
+    kv('llm.output_messages.0.message.contents.2.message_content.text', 'Checking now.'),
+    kv('llm.output_messages.0.message.tool_calls.0.tool_call.id', 'call_weather_1'),
+    kv('llm.output_messages.0.message.tool_calls.0.tool_call.function.name', 'get_weather'),
+    kv('llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments', '{"location":"Sydney"}'),
+  ];
+
+  const message = extractLlmSpanData(tags, []).outputMessages[0];
+
+  assertDeepEquals(message.parts?.map((part) => part.type), ['reasoning', 'tool_call', 'text'], 'ordered tool use stays between reasoning and text');
+  assertDeepEquals(message.parts?.[1], {
+    type: 'tool_call',
+    toolCall: { name: 'get_weather', arguments: '{"location":"Sydney"}', id: 'call_weather_1' },
+  }, 'ordered tool use reads identity and arguments from the sibling tool_call');
+  assertEquals(message.parts?.filter((part) => part.type === 'tool_call').length, 1, 'ordered content contains one tool call');
+  assertEquals(message.toolCalls?.length, 1, 'additive conventional tool call remains available once');
+});
+
+describe('OpenInference sparse flattened indexes', () => {
+  const tags: KeyValuePair[] = [
+    kv('openinference.span.kind', 'LLM'),
+    kv('llm.output_messages.0.message.role', 'assistant'),
+    kv('llm.output_messages.0.message.contents.2.message_content.type', 'text'),
+    kv('llm.output_messages.0.message.contents.2.message_content.text', 'After tool calls.'),
+    kv('llm.output_messages.0.message.contents.0.message_content.type', 'reasoning'),
+    kv('llm.output_messages.0.message.contents.0.message_content.text', 'Plan first.'),
+    kv('llm.output_messages.0.message.tool_calls.4.tool_call.id', 'call_4'),
+    kv('llm.output_messages.0.message.tool_calls.4.tool_call.function.name', 'fourth_call'),
+    kv('llm.output_messages.0.message.tool_calls.4.tool_call.function.arguments', '{}'),
+    kv('llm.output_messages.0.message.tool_calls.1.tool_call.id', 'call_1'),
+    kv('llm.output_messages.0.message.tool_calls.1.tool_call.function.name', 'first_call'),
+    kv('llm.output_messages.0.message.tool_calls.1.tool_call.function.arguments', '{}'),
+  ];
+
+  const message = extractLlmSpanData(tags, []).outputMessages[0];
+
+  assertDeepEquals(message.parts?.map((part) => part.type), ['reasoning', 'text'], 'sparse content indexes normalize into dense numeric order');
+  assertDeepEquals(message.toolCalls?.map((call) => call.name), ['first_call', 'fourth_call'], 'sparse tool-call indexes normalize into dense numeric order');
+});
+
+describe('OpenInference unreasonable flattened indexes are ignored', () => {
+  const tags: KeyValuePair[] = [
+    kv('openinference.span.kind', 'LLM'),
+    kv('llm.output_messages.0.message.role', 'assistant'),
+    kv('llm.output_messages.0.message.contents.0.message_content.type', 'text'),
+    kv('llm.output_messages.0.message.contents.0.message_content.text', 'Safe content.'),
+    kv('llm.output_messages.0.message.contents.100000000.message_content.type', 'text'),
+    kv('llm.output_messages.0.message.contents.100000000.message_content.text', 'Unreasonable content.'),
+    kv('llm.output_messages.0.message.tool_calls.100000000.tool_call.id', 'huge_call'),
+    kv('llm.output_messages.100000000.message.role', 'assistant'),
+  ];
+
+  const result = extractLlmSpanData(tags, []);
+
+  assertEquals(result.outputMessages.length, 1, 'unreasonable message index is rejected');
+  assertEquals(result.outputMessages[0].content, 'Safe content.', 'reasonable content survives rejected indexes');
+  assertEquals(result.outputMessages[0].parts?.length, 1, 'unreasonable content index is rejected');
+  assertEquals(result.outputMessages[0].toolCalls, undefined, 'unreasonable tool-call index is rejected');
+});
+
+describe('OTel GenAI native structured messages', () => {
+  const callId = 'call_VSPygqKTWdrhaFErNvMV18Yl';
+  const tags: KeyValuePair[] = [
+    kv('gen_ai.system', 'openai'),
+    kv('gen_ai.request.model', 'gpt-4o'),
+    kv('gen_ai.input.messages', [
+      {
+        role: 'user',
+        parts: [{ type: 'text', content: 'Weather in Paris?' }],
+      },
+      {
+        role: 'assistant',
+        parts: [{
+          type: 'tool_call',
+          id: callId,
+          name: 'get_weather',
+          arguments: { location: 'Paris' },
+        }],
+      },
+      {
+        role: 'tool',
+        parts: [{
+          type: 'tool_call_response',
+          id: callId,
+          response: 'rainy, 57F',
+        }],
+      },
+    ]),
+    kv('gen_ai.output.messages', [
+      {
+        role: 'assistant',
+        parts: [{ type: 'text', content: 'The weather is rainy.' }],
+        finish_reason: 'stop',
+      },
+    ]),
+  ];
+
+  const result = extractLlmSpanData(tags, []);
+
+  assertEquals(result.inputMessages.length, 3, 'three native OTel input messages');
+  assertEquals(result.inputMessages[0]?.content, 'Weather in Paris?', 'OTel text content normalized');
+  assertEquals(result.inputMessages[1]?.parts?.[0]?.type, 'tool_call', 'OTel tool call part normalized');
+  assertDeepEquals(result.inputMessages[1]?.toolCalls, [{
+    name: 'get_weather',
+    arguments: '{"location":"Paris"}',
+    id: callId,
+  }], 'OTel tool call compatibility field normalized');
+  assertEquals(result.inputMessages[2]?.parts?.[0]?.type, 'tool_result', 'OTel tool response normalized');
+  assertEquals(result.outputMessages[0]?.content, 'The weather is rainy.', 'OTel output text normalized');
+});
+
+describe('Vertex function parts preserve camel-case and snake-case variants', () => {
+  const request = JSON.stringify({
+    contents: [
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'lookup_ticket', args: { key: 'PROJ-42' }, id: 'call_1' } }],
+      },
+      {
+        role: 'user',
+        parts: [{ function_response: { name: 'lookup_ticket', response: { status: 'open' }, id: 'call_1' } }],
+      },
+    ],
+  });
+  const response = JSON.stringify({
+    candidates: [{
+      content: {
+        role: 'model',
+        parts: [{ function_call: { name: 'transfer_agent', args: { queue: 'jira' }, id: 'call_2' } }],
+      },
+    }],
+  });
+  const tags: KeyValuePair[] = [
+    kv('gen_ai.system', 'vertex_ai'),
+    kv('gcp.vertex.agent.llm_request', request),
+    kv('gcp.vertex.agent.llm_response', response),
+  ];
+
+  const result = extractLlmSpanData(tags, []);
+
+  assertEquals(result.inputMessages[0]?.parts?.[0]?.type, 'tool_call', 'Vertex camel-case function call normalized');
+  assertEquals(result.inputMessages[0]?.toolCalls?.[0]?.name, 'lookup_ticket', 'Vertex camel-case call name');
+  assertEquals(result.inputMessages[0]?.content, '', 'Vertex call is not rendered as annotated prose');
+  assertEquals(result.inputMessages[1]?.parts?.[0]?.type, 'tool_result', 'Vertex snake-case function response normalized');
+  assertEquals(result.outputMessages[0]?.parts?.[0]?.type, 'tool_call', 'Vertex snake-case function call normalized');
+  assertEquals(result.outputMessages[0]?.toolCalls?.[0]?.name, 'transfer_agent', 'Vertex response call name');
+});
+
+describe('OpenInference advertised tool definitions', () => {
+  const wrapped = {
+    type: 'function',
+    function: {
+      name: 'get_jira_issue',
+      description: 'Get one Jira issue.',
+      parameters: {
+        type: 'object',
+        properties: { issue_key: { type: 'string', description: 'Jira issue key.' } },
+        required: ['issue_key'],
+      },
+      strict: false,
+    },
+  };
+  const direct = { type: 'function', name: 'save_memory', parameters: { type: 'object', properties: {} } };
+  const result = extractLlmSpanData([
+    kv('openinference.span.kind', 'LLM'),
+    kv('llm.tools.4.tool.json_schema', JSON.stringify(direct)),
+    kv('llm.tools.0.tool.json_schema', JSON.stringify(wrapped)),
+    kv('llm.tools.7.tool.json_schema', '{broken'),
+  ], []);
+
+  assertEquals(result.tools?.length, 3, 'all OpenInference definitions retained');
+  assertDeepEquals(result.tools?.map((tool) => tool.index), [0, 4, 7], 'source indices sorted numerically');
+  assertEquals(result.tools?.[0]?.name, 'get_jira_issue', 'wrapped function name normalized');
+  assertEquals(result.tools?.[0]?.description, 'Get one Jira issue.', 'description normalized');
+  assertEquals(result.tools?.[0]?.strict, false, 'nested strictness normalized');
+  assertEquals(result.tools?.[1]?.name, 'save_memory', 'direct definition normalized');
+  assertEquals(result.tools?.[2]?.name, 'Invalid tool definition', 'malformed definition labeled');
+  assertEquals(result.tools?.[2]?.isValid, false, 'malformed definition retained as invalid');
+  assertEquals(result.tools?.[2]?.raw, '{broken', 'malformed raw value preserved');
+});
+
+describe('OTel advertised tool definitions accept structured and JSON values', () => {
+  const flat = {
+    type: 'function',
+    name: 'get_weather',
+    description: 'Get weather.',
+    parameters: { type: 'object', properties: { city: { type: 'string' } } },
+  };
+  const structured = extractLlmSpanData([
+    kv('gen_ai.system', 'openai'),
+    kv('gen_ai.tool.definitions', [flat]),
+  ], []);
+  const encoded = extractLlmSpanData([
+    kv('gen_ai.system', 'openai'),
+    kv('gen_ai.tool.definitions', JSON.stringify([{ type: 'function', function: flat }])),
+  ], []);
+
+  assertEquals(structured.tools?.[0]?.name, 'get_weather', 'structured OTel definition normalized');
+  assertEquals(encoded.tools?.[0]?.name, 'get_weather', 'JSON OTel wrapper normalized');
+  assertEquals(encoded.tools?.[0]?.index, 0, 'OTel list order retained');
+});
+
+describe('Vertex advertised tool definitions accept both declaration key styles', () => {
+  const request = JSON.stringify({
+    tools: [
+      { functionDeclarations: [{ name: 'lookup_ticket', description: 'Look up a ticket.', parameters: { type: 'object' } }] },
+      { function_declarations: [{ name: 'transfer_agent', parameters_json_schema: { type: 'object' } }] },
+    ],
+    contents: [],
+  });
+  const result = extractLlmSpanData([
+    kv('gen_ai.system', 'vertex_ai'),
+    kv('gcp.vertex.agent.llm_request', request),
+  ], []);
+
+  assertDeepEquals(result.tools?.map((tool) => tool.name), ['lookup_ticket', 'transfer_agent'], 'Vertex declarations normalized in order');
+  assertDeepEquals(result.tools?.[1]?.parameters, { type: 'object' }, 'Vertex snake-case parameter schema normalized');
+});
+
+describe('structured tool-role text becomes a correlated tool result', () => {
+  const result = extractLlmSpanData([
+    kv('openinference.span.kind', 'LLM'),
+    kv('llm.input_messages.0.message.role', 'tool'),
+    kv('llm.input_messages.0.message.tool_call_id', 'call_jira_1'),
+    kv('llm.input_messages.0.message.contents.0.message_content.type', 'text'),
+    kv('llm.input_messages.0.message.contents.0.message_content.text', '{"key":"PROJ-123"}'),
+  ], []);
+  const part = result.inputMessages[0].parts?.[0];
+
+  assertEquals(part?.type, 'tool_result', 'tool-role text normalized as a result part');
+  assertEquals(part?.type === 'tool_result' ? part.toolCallId : undefined, 'call_jira_1', 'tool result call ID retained');
+  assertEquals(part?.type === 'tool_result' ? part.result : undefined, '{"key":"PROJ-123"}', 'tool result text retained');
+});
+
+describe('LLM display attribute keys - supported semantic conventions', () => {
+  const openInferenceTags = [
+    kv('openinference.span.kind', 'LLM'),
+    kv('llm.model_name', 'gpt-4o'),
+    kv('llm.system', 'openai'),
+    kv('llm.input_messages.0.message.role', 'user'),
+    kv('llm.input_messages.0.message.content', 'Hello'),
+    kv('llm.output_messages.0.message.role', 'assistant'),
+    kv('llm.output_messages.0.message.content', 'Hi'),
+    kv('llm.tools.0.tool.json_schema', '{"name":"search"}'),
+    kv('llm.token_count.prompt', 12),
+    kv('llm.request.model', 'unconsumed-model'),
+    kv('model', 'unconsumed-model'),
+    kv('telemetry.sdk.name', 'openinference'),
+  ];
+  const openInferenceKeys = getLlmDisplayAttributeKeys(openInferenceTags, extractLlmSpanData(openInferenceTags, []));
+  assertDeepEquals(
+    Array.from(openInferenceKeys).sort(),
+    [
+      'llm.input_messages.0.message.content',
+      'llm.input_messages.0.message.role',
+      'llm.model_name',
+      'llm.output_messages.0.message.content',
+      'llm.output_messages.0.message.role',
+      'llm.system',
+      'llm.token_count.prompt',
+      'llm.tools.0.tool.json_schema',
+      'openinference.span.kind',
+    ],
+    'OpenInference keys shown in the structured view are identified without unrelated attributes'
+  );
+
+  const otelTags = [
+    kv('gen_ai.system', 'openai'),
+    kv('gen_ai.operation.name', 'chat'),
+    kv('gen_ai.request.model', 'gpt-4o'),
+    kv('gen_ai.input.messages', [{ role: 'user', content: 'Hello' }]),
+    kv('gen_ai.output.messages', [{ role: 'assistant', content: 'Hi' }]),
+    kv('gen_ai.tool.definitions', [{ type: 'function', name: 'search' }]),
+    kv('gen_ai.request.temperature', 0.2),
+    kv('llm.model_name', 'unconsumed-model'),
+    kv('model', 'unconsumed-model'),
+    kv('gen_ai.response.id', 'response-1'),
+  ];
+  const otelKeys = getLlmDisplayAttributeKeys(otelTags, extractLlmSpanData(otelTags, []));
+  assertDeepEquals(
+    Array.from(otelKeys).sort(),
+    [
+      'gen_ai.input.messages',
+      'gen_ai.operation.name',
+      'gen_ai.output.messages',
+      'gen_ai.request.model',
+      'gen_ai.request.temperature',
+      'gen_ai.system',
+      'gen_ai.tool.definitions',
+    ],
+    'OTel GenAI keys shown in the structured view are identified without response metadata'
+  );
+
+  const vertexTags = [
+    kv('gen_ai.system', 'vertex_ai'),
+    kv('gen_ai.request.model', 'gemini-2.5-pro'),
+    kv('gcp.vertex.agent.llm_request', '{"contents":[{"role":"user","parts":[{"text":"Hello"}]}]}'),
+    kv('gcp.vertex.agent.llm_response', '{"candidates":[{"content":{"role":"model","parts":[{"text":"Hi"}]}}]}'),
+    kv('gcp.vertex.agent.session_id', 'session-1'),
+  ];
+  const vertexKeys = getLlmDisplayAttributeKeys(vertexTags, extractLlmSpanData(vertexTags, []));
+  assertDeepEquals(
+    Array.from(vertexKeys).sort(),
+    [
+      'gcp.vertex.agent.llm_request',
+      'gcp.vertex.agent.llm_response',
+      'gen_ai.request.model',
+      'gen_ai.system',
+    ],
+    'Vertex payload keys shown in the structured view are identified without session metadata'
+  );
+
+  const unknownTags = [
+    kv('http.method', 'POST'),
+    kv('input.value', '{"large":"payload"}'),
+  ];
+  const unknownKeys = getLlmDisplayAttributeKeys(unknownTags, extractLlmSpanData(unknownTags, []));
+  assertEquals(unknownKeys.size, 0, 'ordinary spans do not collapse attributes');
 });
 
 // ---------------------------------------------------------------------------

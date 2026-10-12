@@ -12,16 +12,38 @@ export interface SpanLog {
   fields: KeyValuePair[];
 }
 
+export type LlmMessagePart =
+  | { type: 'text'; text: string }
+  | { type: 'reasoning'; text: string; value?: unknown }
+  | { type: 'image' | 'audio'; value: unknown }
+  | { type: 'tool_call'; toolCall: LlmToolCall }
+  | { type: 'tool_result'; result: unknown; toolCallId?: string; name?: string }
+  | { type: 'unknown'; value: unknown };
+
 export interface LlmMessage {
   role: string;
   content: string;
+  parts?: LlmMessagePart[];
   toolCalls?: LlmToolCall[];
+  toolCallId?: string;
+  name?: string;
 }
 
 export interface LlmToolCall {
   name: string;
   arguments: string;
   id?: string;
+}
+
+export interface LlmToolDefinition {
+  index: number;
+  type: string;
+  name: string;
+  description?: string;
+  parameters?: unknown;
+  strict?: boolean;
+  raw: unknown;
+  isValid: boolean;
 }
 
 export interface LlmTokenUsage {
@@ -47,6 +69,7 @@ export interface LlmSpanData {
   system?: string;
   inputMessages: LlmMessage[];
   outputMessages: LlmMessage[];
+  tools: LlmToolDefinition[];
   tokenUsage: LlmTokenUsage;
   invocationParams: LlmInvocationParams;
   finishReason?: string;
@@ -69,10 +92,13 @@ export function decodeUnicodeEscapes(s: string): string {
 }
 
 function getAttr(tags: KeyValuePair[], key: string): string | undefined {
-  const tag = tags.find((t) => t.key === key);
-  if (tag === undefined) return undefined;
-  if (tag.value === null || tag.value === undefined) return undefined;
-  return decodeUnicodeEscapes(String(tag.value));
+  const value = getRawAttr(tags, key);
+  if (value === null || value === undefined) return undefined;
+  return decodeUnicodeEscapes(String(value));
+}
+
+function getRawAttr(tags: KeyValuePair[], key: string): unknown {
+  return tags.find((tag) => tag.key === key)?.value;
 }
 
 function getNumAttr(tags: KeyValuePair[], key: string): number | undefined {
@@ -101,62 +127,329 @@ function isRecord(val: unknown): val is Record<string, unknown> {
   return typeof val === 'object' && val !== null && !Array.isArray(val);
 }
 
-function normalizeToolCalls(raw: unknown): LlmToolCall[] | undefined {
-  if (!Array.isArray(raw) || raw.length === 0) {
-    return undefined;
+function stringifyValue(value: unknown): string {
+  if (typeof value === 'string') {
+    return decodeUnicodeEscapes(value);
   }
-  return raw.map((tc: unknown) => {
-    if (!isRecord(tc)) {
-      return { name: 'unknown', arguments: '' };
+  if (value !== null && typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return '';
     }
-    const fnRaw = tc.function;
-    const fn = isRecord(fnRaw) ? fnRaw : undefined;
-    const name = String((fn && fn.name) || tc.name || 'unknown');
-    const rawArgs = (fn && fn.arguments) ?? tc.arguments ?? '';
-    const args = typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs);
-    return { name, arguments: args, id: tc.id ? String(tc.id) : undefined };
-  });
+  }
+  return value === undefined ? '' : String(value);
 }
 
-function extractMessagesFromJsonValue(value: string): LlmMessage[] {
+function normalizeToolCall(raw: unknown): LlmToolCall {
+  if (!isRecord(raw)) {
+    return { name: 'unknown', arguments: '' };
+  }
+  const toolCall = isRecord(raw.tool_call) ? raw.tool_call : raw;
+  const fn = isRecord(toolCall.function) ? toolCall.function : undefined;
+  const name = stringifyValue(fn?.name ?? toolCall.name ?? 'unknown');
+  const argumentsValue = fn?.arguments ?? toolCall.arguments ?? toolCall.args ?? toolCall.input ?? '';
+  const id = toolCall.id ?? toolCall.call_id;
+  return {
+    name,
+    arguments: stringifyValue(argumentsValue),
+    id: id === undefined || id === null ? undefined : String(id),
+  };
+}
+
+function normalizeToolCalls(raw: unknown): LlmToolCall[] | undefined {
+  let parsed = raw;
+  if (typeof parsed === 'string') {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return undefined;
+    }
+  }
+  const calls = getDenseIndexedValues(parsed);
+  if (!calls || calls.length === 0) {
+    return undefined;
+  }
+  return calls.map(normalizeToolCall);
+}
+
+function parseJsonValue(value: unknown): unknown {
+  if (typeof value !== 'string') {
+    return value;
+  }
   try {
-    const parsed = JSON.parse(value);
-    if (Array.isArray(parsed)) {
-      return parsed
-        .filter((m) => m && typeof m === 'object' && (m.role || m['message.role']))
-        .map((m: Record<string, unknown>) => ({
-          role: String(m.role || m['message.role'] || 'unknown'),
-          content: String(m.content ?? m['message.content'] ?? m.text ?? ''),
-          toolCalls: normalizeToolCalls(m.tool_calls),
-        }));
-    }
-    if (typeof parsed === 'object' && parsed !== null) {
-      const messagesField = (parsed as Record<string, unknown>).messages || (parsed as Record<string, unknown>).Messages || (parsed as Record<string, unknown>).prompt;
-      if (Array.isArray(messagesField)) {
-        return messagesField
-          .filter((m: Record<string, unknown>) => m && typeof m === 'object' && (m.role || m['message.role']))
-          .map((m: Record<string, unknown>) => ({
-            role: String(m.role || m['message.role'] || 'unknown'),
-            content: String(m.content ?? m['message.content'] ?? m.text ?? ''),
-            toolCalls: normalizeToolCalls(m.tool_calls),
-          }));
-      }
-      if ((parsed as Record<string, unknown>).role) {
-        return [{
-          role: String((parsed as Record<string, unknown>).role),
-          content: String((parsed as Record<string, unknown>).content ?? (parsed as Record<string, unknown>).text ?? ''),
-          toolCalls: normalizeToolCalls((parsed as Record<string, unknown>).tool_calls),
-        }];
-      }
-    }
+    return JSON.parse(value);
   } catch {
-    // not valid JSON
+    return value;
+  }
+}
+
+function normalizeToolDefinition(raw: unknown, index: number): LlmToolDefinition {
+  const parsed = parseJsonValue(raw);
+  const outer = isRecord(parsed) ? parsed : undefined;
+  const definition = outer && isRecord(outer.function) ? outer.function : outer;
+  const validName = definition && typeof definition.name === 'string' && definition.name.trim() !== '';
+  const description = definition && typeof definition.description === 'string' ? definition.description : undefined;
+  const parameters = definition?.parameters ?? definition?.parameters_json_schema ?? definition?.parametersJsonSchema;
+  const strictValue = definition?.strict ?? outer?.strict;
+  return {
+    index,
+    type: outer && typeof outer.type === 'string' ? outer.type : 'function',
+    name: validName ? String(definition.name) : 'Invalid tool definition',
+    ...(description !== undefined ? { description } : {}),
+    ...(parameters !== undefined ? { parameters } : {}),
+    ...(typeof strictValue === 'boolean' ? { strict: strictValue } : {}),
+    raw: parsed,
+    isValid: Boolean(validName),
+  };
+}
+
+function extractOpenInferenceToolDefinitions(tags: KeyValuePair[]): LlmToolDefinition[] {
+  const definitions: LlmToolDefinition[] = [];
+  for (const tag of tags) {
+    const match = tag.key.match(/^llm\.tools\.(\d+)\.tool\.json_schema$/);
+    if (match) {
+      definitions.push(normalizeToolDefinition(tag.value, Number(match[1])));
+    }
+  }
+  return definitions.sort((left, right) => left.index - right.index);
+}
+
+function extractOtelToolDefinitions(tags: KeyValuePair[]): LlmToolDefinition[] {
+  const raw = getRawAttr(tags, 'gen_ai.tool.definitions');
+  if (raw === undefined || raw === null) {
+    return [];
+  }
+  const parsed = parseJsonValue(raw);
+  const definitions = Array.isArray(parsed) ? parsed : [parsed];
+  return definitions.map(normalizeToolDefinition);
+}
+
+function extractVertexToolDefinitions(jsonBlob: string | undefined): LlmToolDefinition[] {
+  if (!jsonBlob) {
+    return [];
+  }
+  const parsed = parseJsonValue(jsonBlob);
+  if (!isRecord(parsed) || !Array.isArray(parsed.tools)) {
+    return [];
+  }
+  const definitions: LlmToolDefinition[] = [];
+  for (const tool of parsed.tools) {
+    if (!isRecord(tool)) {
+      continue;
+    }
+    const declarations = tool.functionDeclarations ?? tool.function_declarations;
+    if (!Array.isArray(declarations)) {
+      continue;
+    }
+    for (const declaration of declarations) {
+      definitions.push(normalizeToolDefinition(declaration, definitions.length));
+    }
+  }
+  return definitions;
+}
+
+function normalizeMessagePart(raw: unknown): LlmMessagePart {
+  const wrapper = isRecord(raw) ? raw : undefined;
+  const part = wrapper && isRecord(wrapper.message_content) ? wrapper.message_content : raw;
+  if (!isRecord(part)) {
+    return { type: 'unknown', value: raw };
+  }
+  const functionCall = isRecord(part.functionCall)
+    ? part.functionCall
+    : isRecord(part.function_call)
+      ? part.function_call
+      : undefined;
+  if (functionCall) {
+    return { type: 'tool_call', toolCall: normalizeToolCall(functionCall) };
+  }
+  const functionResponse = isRecord(part.functionResponse)
+    ? part.functionResponse
+    : isRecord(part.function_response)
+      ? part.function_response
+      : undefined;
+  if (functionResponse) {
+    const id = functionResponse.id ?? functionResponse.call_id;
+    const name = functionResponse.name;
+    return {
+      type: 'tool_result',
+      result: functionResponse.response ?? functionResponse.result ?? '',
+      toolCallId: id === undefined || id === null ? undefined : String(id),
+      name: name === undefined || name === null ? undefined : String(name),
+    };
+  }
+  const type = String(part.type ?? '').toLowerCase();
+  if (type === 'text' || (!type && part.text !== undefined)) {
+    return { type: 'text', text: stringifyValue(part.text ?? part.content ?? '') };
+  }
+  if (type === 'reasoning') {
+    return {
+      type: 'reasoning',
+      text: stringifyValue(part.text ?? part.content ?? ''),
+      value: part,
+    };
+  }
+  if (type === 'image' || type === 'audio') {
+    return { type, value: part };
+  }
+  if (type === 'tool_call' || type === 'tool_use') {
+    return { type: 'tool_call', toolCall: normalizeToolCall(wrapper ?? part) };
+  }
+  if (type === 'tool_call_response' || type === 'tool_call_result' || type === 'tool_result') {
+    const id = part.id ?? part.call_id ?? part.tool_call_id;
+    const name = part.name;
+    return {
+      type: 'tool_result',
+      result: part.response ?? part.result ?? part.output ?? part.content ?? '',
+      toolCallId: id === undefined || id === null ? undefined : String(id),
+      name: name === undefined || name === null ? undefined : String(name),
+    };
+  }
+  return { type: 'unknown', value: part };
+}
+
+function firstPresentValue(source: Record<string, unknown>, keys: string[]): unknown {
+  for (const key of keys) {
+    if (key in source) {
+      return source[key];
+    }
+  }
+  return undefined;
+}
+
+const MAX_FLATTENED_LIST_INDEX = 1000;
+
+function getBoundedIndex(value: string): number | undefined {
+  if (!/^(0|[1-9]\d*)$/.test(value)) {
+    return undefined;
+  }
+  const index = Number(value);
+  return Number.isSafeInteger(index) && index <= MAX_FLATTENED_LIST_INDEX ? index : undefined;
+}
+
+function getDenseIndexedValues(value: unknown): unknown[] | undefined {
+  if (!Array.isArray(value) && !isRecord(value)) {
+    return undefined;
+  }
+  return Object.entries(value)
+    .map(([key, entry]) => ({ index: getBoundedIndex(key), entry }))
+    .filter((item): item is { index: number; entry: unknown } => item.index !== undefined)
+    .sort((left, right) => left.index - right.index)
+    .map(({ entry }) => entry);
+}
+
+function normalizeMessage(raw: unknown, defaultRole = 'unknown'): LlmMessage | undefined {
+  if (!isRecord(raw)) {
+    return undefined;
+  }
+  const source = isRecord(raw.message) ? raw.message : raw;
+  const roleValue = firstPresentValue(source, ['role', 'message.role']);
+  const role = roleValue === undefined || roleValue === null ? defaultRole : String(roleValue);
+  const contentValue = firstPresentValue(source, ['content', 'message.content', 'text']);
+  const rawParts = firstPresentValue(source, ['contents', 'parts']);
+  const partsValue = getDenseIndexedValues(rawParts) ?? getDenseIndexedValues(contentValue);
+  const parts = partsValue?.map(normalizeMessagePart);
+  const textFromParts = parts
+    ?.filter((part): part is Extract<LlmMessagePart, { type: 'text' }> => part.type === 'text')
+    .map((part) => part.text)
+    .join('') ?? '';
+  const content = contentValue === undefined ? textFromParts : stringifyValue(contentValue);
+  const messageToolCalls = normalizeToolCalls(firstPresentValue(source, ['tool_calls', 'toolCalls']));
+  const partToolCalls = parts
+    ?.filter((part): part is Extract<LlmMessagePart, { type: 'tool_call' }> => part.type === 'tool_call')
+    .map((part) => part.toolCall);
+  const toolCalls = messageToolCalls ?? (partToolCalls && partToolCalls.length > 0 ? partToolCalls : undefined);
+  const toolCallIdValue = firstPresentValue(source, ['tool_call_id', 'toolCallId']);
+  const nameValue = source.name;
+  const toolCallId = toolCallIdValue === undefined || toolCallIdValue === null ? undefined : String(toolCallIdValue);
+  const name = nameValue === undefined || nameValue === null ? undefined : String(nameValue);
+  const normalizedParts = parts ? [...parts] : [];
+  const hasToolResult = normalizedParts.some((part) => part.type === 'tool_result');
+  const hasOnlyTextParts = normalizedParts.length > 0 && normalizedParts.every((part) => part.type === 'text');
+  if ((role === 'tool' || role === 'function') && !hasToolResult && (normalizedParts.length === 0 || hasOnlyTextParts)) {
+    normalizedParts.splice(0, normalizedParts.length, { type: 'tool_result', result: content, toolCallId, name });
+  }
+  return {
+    role,
+    content,
+    ...(normalizedParts.length > 0 ? { parts: normalizedParts } : {}),
+    ...(toolCalls ? { toolCalls } : {}),
+    ...(toolCallId ? { toolCallId } : {}),
+    ...(name ? { name } : {}),
+  };
+}
+
+function extractMessagesFromValue(value: unknown): LlmMessage[] {
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed === value ? [] : extractMessagesFromValue(parsed);
+    } catch {
+      return [];
+    }
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((message) => normalizeMessage(message))
+      .filter((message): message is LlmMessage => message !== undefined);
+  }
+  if (!isRecord(value)) {
+    return [];
+  }
+  const messagesField = value.messages ?? value.Messages ?? value.prompt;
+  if (Array.isArray(messagesField)) {
+    return messagesField
+      .map((message) => normalizeMessage(message))
+      .filter((message): message is LlmMessage => message !== undefined);
+  }
+  if (value.role || value['message.role'] || value.message) {
+    const message = normalizeMessage(value);
+    return message ? [message] : [];
   }
   return [];
 }
 
+function extractMessagesFromJsonValue(value: string): LlmMessage[] {
+  return extractMessagesFromValue(value);
+}
+
+const DANGEROUS_PATH_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
+function setNestedValue(target: Record<string, unknown>, path: string[], value: unknown): void {
+  let current: Record<string, unknown> | unknown[] = target;
+  for (let i = 0; i < path.length - 1; i++) {
+    const key = path[i];
+    if (DANGEROUS_PATH_KEYS.has(key)) {
+      return;
+    }
+    if (/^\d+$/.test(key) && getBoundedIndex(key) === undefined) {
+      return;
+    }
+    const segment = key;
+    const container = current as unknown as Record<string | number, unknown>;
+    if (container[segment] === undefined) {
+      container[segment] = Object.create(null);
+    }
+    const child = container[segment];
+    if (!isRecord(child) && !Array.isArray(child)) {
+      return;
+    }
+    current = child;
+  }
+  const finalKey = path[path.length - 1];
+  if (DANGEROUS_PATH_KEYS.has(finalKey)) {
+    return;
+  }
+  if (/^\d+$/.test(finalKey) && getBoundedIndex(finalKey) === undefined) {
+    return;
+  }
+  const segment = finalKey;
+  const container = current as unknown as Record<string | number, unknown>;
+  container[segment] = value;
+}
+
 function extractIndexedMessages(tags: KeyValuePair[], prefix: string): LlmMessage[] {
-  const messages: Map<number, LlmMessage> = new Map();
+  const messages = new Map<number, Record<string, unknown>>();
   for (const tag of tags) {
     if (!tag.key.startsWith(prefix)) {
       continue;
@@ -166,37 +459,19 @@ function extractIndexedMessages(tags: KeyValuePair[], prefix: string): LlmMessag
     if (!match) {
       continue;
     }
-    const index = parseInt(match[1], 10);
-    const field = match[2];
+    const index = getBoundedIndex(match[1]);
+    if (index === undefined) {
+      continue;
+    }
     if (!messages.has(index)) {
-      messages.set(index, { role: '', content: '' });
+      messages.set(index, Object.create(null));
     }
-    const msg = messages.get(index)!;
-    if (field === 'message.role' || field === 'role') {
-      msg.role = String(tag.value);
-    } else if (field === 'message.content' || field === 'content') {
-      if (typeof tag.value === 'object' && tag.value !== null) {
-        try { msg.content = JSON.stringify(tag.value); } catch { msg.content = ''; }
-      } else {
-        msg.content = decodeUnicodeEscapes(String(tag.value));
-      }
-    } else if (field === 'message.tool_calls' || field === 'tool_calls') {
-      try {
-        const raw = typeof tag.value === 'string' ? JSON.parse(tag.value) : tag.value;
-        msg.toolCalls = normalizeToolCalls(raw) ?? [];
-      } catch {
-        // ignore
-      }
-    }
+    setNestedValue(messages.get(index)!, match[2].split('.'), tag.value);
   }
   return Array.from(messages.entries())
     .sort(([a], [b]) => a - b)
-    .map(([, msg]) => {
-      if (msg.role === '') {
-        msg.role = 'user';
-      }
-      return msg;
-    });
+    .map(([, message]) => normalizeMessage(message, 'user'))
+    .filter((message): message is LlmMessage => message !== undefined);
 }
 
 function tryExtractMessages(content: string): LlmMessage[] {
@@ -273,7 +548,6 @@ function extractMessagesFromEvents(logs: SpanLog[]): { input: LlmMessage[]; outp
 }
 
 function extractGcpVertexRequestMessages(jsonBlob: string): LlmMessage[] {
-  // Gemini API request format: { contents: [{role, parts: [{text}]}], system_instruction?: {parts: [{text}]} }
   try {
     const parsed = JSON.parse(jsonBlob);
     if (!isRecord(parsed)) {
@@ -281,31 +555,20 @@ function extractGcpVertexRequestMessages(jsonBlob: string): LlmMessage[] {
     }
     const messages: LlmMessage[] = [];
     const sysInstr = parsed.system_instruction;
-    if (isRecord(sysInstr) && Array.isArray(sysInstr.parts)) {
-      const text = (sysInstr.parts as unknown[])
-        .map((p) => (isRecord(p) ? String(p.text ?? '') : ''))
-        .join('');
-      if (text) {
-        messages.push({ role: 'system', content: text });
+    if (typeof sysInstr === 'string' && sysInstr) {
+      messages.push({ role: 'system', content: sysInstr });
+    } else if (isRecord(sysInstr)) {
+      const message = normalizeMessage(sysInstr, 'system');
+      if (message) {
+        messages.push(message);
       }
     }
     if (Array.isArray(parsed.contents)) {
       for (const item of parsed.contents as unknown[]) {
-        if (!isRecord(item)) {
-          continue;
+        const message = normalizeMessage(item, 'user');
+        if (message) {
+          messages.push(message);
         }
-        const role = String(item.role ?? 'user');
-        const parts = item.parts;
-        const text = Array.isArray(parts)
-          ? (parts as unknown[]).map((p) => {
-              if (!isRecord(p)) return '';
-              if (p.text !== undefined) return String(p.text);
-              if (p.functionCall !== undefined) return `[Function call: ${JSON.stringify(p.functionCall)}]`;
-              if (p.functionResponse !== undefined) return `[Function response: ${JSON.stringify(p.functionResponse)}]`;
-              return '';
-            }).filter(Boolean).join('\n')
-          : '';
-        messages.push({ role, content: text });
       }
     }
     return messages;
@@ -315,7 +578,6 @@ function extractGcpVertexRequestMessages(jsonBlob: string): LlmMessage[] {
 }
 
 function extractGcpVertexResponseMessages(jsonBlob: string): LlmMessage[] {
-  // Gemini API response format: { candidates: [{content: {role, parts: [{text}]}}] }
   try {
     const parsed = JSON.parse(jsonBlob);
     if (!isRecord(parsed) || !Array.isArray(parsed.candidates)) {
@@ -325,18 +587,7 @@ function extractGcpVertexResponseMessages(jsonBlob: string): LlmMessage[] {
       if (!isRecord(c) || !isRecord(c.content)) {
         return { role: 'model', content: '' };
       }
-      const role = String(c.content.role ?? 'model');
-      const parts = c.content.parts;
-      const text = Array.isArray(parts)
-        ? (parts as unknown[]).map((p) => {
-            if (!isRecord(p)) return '';
-            if (p.text !== undefined) return String(p.text);
-            if (p.functionCall !== undefined) return `[Function call: ${JSON.stringify(p.functionCall)}]`;
-            if (p.functionResponse !== undefined) return `[Function response: ${JSON.stringify(p.functionResponse)}]`;
-            return '';
-          }).filter(Boolean).join('\n')
-        : '';
-      return { role, content: text };
+      return normalizeMessage(c.content, 'model') ?? { role: 'model', content: '' };
     });
   } catch {
     return [];
@@ -384,9 +635,9 @@ function extractOpenInference(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSp
     inputMessages = extractIndexedMessages(tags, 'llm.prompts.');
   }
   if (inputMessages.length === 0) {
-    const genAiInput = getAttr(tags, 'gen_ai.input_messages');
-    if (genAiInput) {
-      inputMessages = extractMessagesFromJsonValue(genAiInput);
+    const genAiInput = getRawAttr(tags, 'gen_ai.input.messages') ?? getRawAttr(tags, 'gen_ai.input_messages');
+    if (genAiInput !== undefined && genAiInput !== null) {
+      inputMessages = extractMessagesFromValue(genAiInput);
     }
   }
   if (inputMessages.length === 0) {
@@ -400,9 +651,9 @@ function extractOpenInference(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSp
     outputMessages = extractIndexedMessages(tags, 'llm.completions.');
   }
   if (outputMessages.length === 0) {
-    const genAiOutput = getAttr(tags, 'gen_ai.output_messages');
-    if (genAiOutput) {
-      outputMessages = extractMessagesFromJsonValue(genAiOutput);
+    const genAiOutput = getRawAttr(tags, 'gen_ai.output.messages') ?? getRawAttr(tags, 'gen_ai.output_messages');
+    if (genAiOutput !== undefined && genAiOutput !== null) {
+      outputMessages = extractMessagesFromValue(genAiOutput);
     }
   }
   if (outputMessages.length === 0) {
@@ -477,6 +728,7 @@ function extractOpenInference(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSp
     system: getAttr(tags, 'gen_ai.system') || getAttr(tags, 'llm.system'),
     inputMessages,
     outputMessages,
+    tools: extractOpenInferenceToolDefinitions(tags),
     tokenUsage: {
       input: getNumAttr(tags, 'llm.token_count.prompt') ?? getNumAttr(tags, 'gen_ai.usage.input_tokens') ?? getNumAttr(tags, 'llm.usage.prompt_tokens'),
       output: getNumAttr(tags, 'llm.token_count.completion') ?? getNumAttr(tags, 'gen_ai.usage.output_tokens') ?? getNumAttr(tags, 'llm.usage.completion_tokens'),
@@ -501,9 +753,9 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
     }
   }
   if (inputMessages.length === 0) {
-    const genAiInput = getAttr(tags, 'gen_ai.input_messages');
-    if (genAiInput) {
-      inputMessages.push(...extractMessagesFromJsonValue(genAiInput));
+    const genAiInput = getRawAttr(tags, 'gen_ai.input.messages') ?? getRawAttr(tags, 'gen_ai.input_messages');
+    if (genAiInput !== undefined && genAiInput !== null) {
+      inputMessages.push(...extractMessagesFromValue(genAiInput));
     }
   }
   if (inputMessages.length === 0) {
@@ -518,9 +770,9 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
     }
   }
   if (outputMessages.length === 0) {
-    const genAiOutput = getAttr(tags, 'gen_ai.output_messages');
-    if (genAiOutput) {
-      outputMessages.push(...extractMessagesFromJsonValue(genAiOutput));
+    const genAiOutput = getRawAttr(tags, 'gen_ai.output.messages') ?? getRawAttr(tags, 'gen_ai.output_messages');
+    if (genAiOutput !== undefined && genAiOutput !== null) {
+      outputMessages.push(...extractMessagesFromValue(genAiOutput));
     }
   }
   if (outputMessages.length === 0) {
@@ -545,6 +797,7 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
     system: getAttr(tags, 'gen_ai.system'),
     inputMessages,
     outputMessages,
+    tools: extractOtelToolDefinitions(tags),
     tokenUsage: {
       input: getNumAttr(tags, 'gen_ai.usage.input_tokens') ?? getNumAttr(tags, 'gen_ai.usage.prompt_tokens'),
       output: getNumAttr(tags, 'gen_ai.usage.output_tokens') ?? getNumAttr(tags, 'gen_ai.usage.completion_tokens'),
@@ -612,6 +865,7 @@ function extractGeneric(tags: KeyValuePair[], logs: SpanLog[], operationName?: s
     model,
     inputMessages,
     outputMessages,
+    tools: [],
     tokenUsage: {
       input: getNumAttr(tags, 'gen_ai.usage.input_tokens') ?? getNumAttr(tags, 'llm.token_count.prompt') ?? getNumAttr(tags, 'prompt_tokens'),
       output: getNumAttr(tags, 'gen_ai.usage.output_tokens') ?? getNumAttr(tags, 'llm.token_count.completion') ?? getNumAttr(tags, 'completion_tokens'),
@@ -630,7 +884,7 @@ function extractGeneric(tags: KeyValuePair[], logs: SpanLog[], operationName?: s
 export function extractLlmSpanData(tags: KeyValuePair[], logs: SpanLog[], operationName?: string): LlmSpanData {
   const convention = detectConvention(tags);
   if (!convention) {
-    return { isLlm: false, convention: 'unknown', model: '', inputMessages: [], outputMessages: [], tokenUsage: {}, invocationParams: {}, finishReason: undefined };
+    return { isLlm: false, convention: 'unknown', model: '', inputMessages: [], outputMessages: [], tools: [], tokenUsage: {}, invocationParams: {}, finishReason: undefined };
   }
   let data: Omit<LlmSpanData, 'isLlm'>;
   switch (convention) {
@@ -641,7 +895,11 @@ export function extractLlmSpanData(tags: KeyValuePair[], logs: SpanLog[], operat
       data = extractOtelGenAi(tags, logs);
       break;
     case 'vertex':
-      data = { ...extractOpenInference(tags, logs), convention: 'vertex' };
+      data = {
+        ...extractOpenInference(tags, logs),
+        convention: 'vertex',
+        tools: extractVertexToolDefinitions(getAttr(tags, 'gcp.vertex.agent.llm_request')),
+      };
       break;
     default:
       data = extractGeneric(tags, logs, operationName);
@@ -653,6 +911,145 @@ export function extractLlmSpanData(tags: KeyValuePair[], logs: SpanLog[], operat
     ? data.spanKind?.toUpperCase() === 'LLM' || data.spanKind?.toUpperCase() === 'GUARDRAIL'
     : true;
   return { isLlm, ...data };
+}
+
+export function getLlmDisplayAttributeKeys(
+  tags: KeyValuePair[],
+  data: LlmSpanData
+): Set<string> {
+  if (data.convention === 'unknown') {
+    return new Set();
+  }
+
+  const keys = new Set<string>();
+  const addExact = (...candidates: string[]) => {
+    for (const candidate of candidates) {
+      if (tags.some((tag) => tag.key === candidate)) {
+        keys.add(candidate);
+      }
+    }
+  };
+  const addPrefixes = (...prefixes: string[]) => {
+    for (const tag of tags) {
+      if (prefixes.some((prefix) => tag.key.startsWith(prefix))) {
+        keys.add(tag.key);
+      }
+    }
+  };
+
+  if (data.model && data.model !== 'unknown') {
+    if (data.convention === 'openinference' || data.convention === 'vertex') {
+      addExact('gen_ai.response.model', 'llm.model_name', 'gen_ai.request.model');
+    } else if (data.convention === 'otel-genai') {
+      addExact('gen_ai.response.model', 'gen_ai.request.model', 'llm.request.model');
+    } else {
+      addExact('gen_ai.request.model', 'llm.model_name', 'model');
+    }
+  }
+  if (data.system) {
+    if (data.convention === 'openinference' || data.convention === 'vertex') {
+      addExact('gen_ai.system', 'llm.system');
+    } else {
+      addExact('gen_ai.system');
+    }
+  }
+  if (getSpanKind(tags)) {
+    if (data.convention === 'openinference' || data.convention === 'vertex') {
+      addExact('openinference.span.kind', 'llm.request.type');
+    } else if (data.convention === 'otel-genai') {
+      addExact('gen_ai.operation.name');
+    }
+  }
+
+  if (data.convention === 'openinference' || data.convention === 'vertex') {
+    if (data.inputMessages.length > 0) {
+      addExact('gen_ai.input.messages', 'gen_ai.input_messages', 'gcp.vertex.agent.llm_request', 'input.value');
+      addPrefixes('llm.input_messages.', 'llm.prompts.');
+    }
+    if (data.outputMessages.length > 0) {
+      addExact('gen_ai.output.messages', 'gen_ai.output_messages', 'gcp.vertex.agent.llm_response', 'output.value');
+      addPrefixes('llm.output_messages.', 'llm.completions.');
+    }
+    if (data.tools.length > 0) {
+      addExact('gcp.vertex.agent.llm_request');
+      addPrefixes('llm.tools.');
+    }
+  } else if (data.convention === 'otel-genai') {
+    if (data.inputMessages.length > 0) {
+      addExact('gen_ai.prompt', 'gen_ai.input.messages', 'gen_ai.input_messages');
+      addPrefixes('gen_ai.prompt.');
+    }
+    if (data.outputMessages.length > 0) {
+      addExact('gen_ai.completion', 'gen_ai.output.messages', 'gen_ai.output_messages');
+      addPrefixes('gen_ai.completion.');
+    }
+    if (data.tools.length > 0) {
+      addExact('gen_ai.tool.definitions');
+    }
+  } else {
+    if (data.inputMessages.length > 0) {
+      addExact('workflow.input', 'input.value', 'input', 'request.body', 'llm.input', 'prompt');
+    }
+    if (data.outputMessages.length > 0) {
+      addExact('workflow.output', 'output.value', 'output', 'response.body', 'llm.output', 'completion');
+    }
+  }
+
+  if (data.tokenUsage.input !== undefined) {
+    addExact('llm.token_count.prompt', 'gen_ai.usage.input_tokens', 'gen_ai.usage.prompt_tokens', 'llm.usage.prompt_tokens', 'prompt_tokens');
+  }
+  if (data.tokenUsage.output !== undefined) {
+    addExact('llm.token_count.completion', 'gen_ai.usage.output_tokens', 'gen_ai.usage.completion_tokens', 'llm.usage.completion_tokens', 'completion_tokens');
+  }
+  if (data.tokenUsage.total !== undefined) {
+    addExact('llm.token_count.total', 'gen_ai.usage.total_tokens', 'llm.usage.total_tokens', 'total_tokens');
+  }
+
+  if (Object.values(data.invocationParams).some((value) => value !== undefined && value !== null)) {
+    addExact(
+      'llm.invocation_parameters',
+      'gen_ai.request.temperature',
+      'gen_ai.request.max_tokens',
+      'gen_ai.request.top_p',
+      'gen_ai.request.top_k',
+      'gen_ai.request.frequency_penalty',
+      'gen_ai.request.presence_penalty',
+      'gen_ai.operation.name',
+      'temperature',
+      'max_tokens',
+      'top_p'
+    );
+  }
+  if (data.finishReason) {
+    addExact(
+      'llm.output_messages.0.message.finish_reason',
+      'output.finish_reason',
+      'llm.stop_reason',
+      'gen_ai.response.finish_reasons',
+      'gen_ai.response.finish_reasons.0',
+      'gen_ai.finish_reason',
+      'finish_reason',
+      'stop_reason'
+    );
+  }
+  if (data.precomputedCostUsd !== undefined) {
+    addExact('gen_ai.cost.total_cost');
+  }
+
+  const openInferenceKind = data.spanKind?.toUpperCase();
+  if (openInferenceKind === 'TOOL') {
+    addExact('tool.name', 'tool.description', 'tool.parameters', 'input.value', 'output.value');
+  } else if (openInferenceKind === 'RERANKER') {
+    addExact('reranker.query', 'reranker.model_name', 'input.value', 'output.value');
+    addPrefixes('reranker.results.');
+  } else if (openInferenceKind === 'RETRIEVER') {
+    addExact('input.value');
+    addPrefixes('retrieval.documents.');
+  } else if (['CHAIN', 'AGENT', 'EMBEDDING', 'UNKNOWN'].includes(openInferenceKind ?? '')) {
+    addExact('input.value', 'output.value');
+  }
+
+  return keys;
 }
 
 export function isAiSpan(tags: KeyValuePair[]): boolean {

@@ -7,6 +7,7 @@ import { locationService } from '@grafana/runtime';
 import { useStyles2, useTheme2, Button, ClipboardButton, Select, Alert, Icon, LoadingPlaceholder, TimeRangePicker } from '@grafana/ui';
 
 import { TraceDetailView } from '../components/TraceDetail';
+import { TRACE_DETAIL_MIN_WIDTH } from '../components/TraceDetail.styles';
 import { TraceSummaryBar } from '../components/TraceSummaryBar';
 import { getStyles } from './TraceExplorer.styles';
 import {
@@ -48,7 +49,9 @@ export function TraceExplorer() {
   const theme = useTheme2();
 
   const [toolbarCollapsed, setToolbarCollapsed] = useState(false);
-  const [traceListCollapsed, setTraceListCollapsed] = useState(false);
+  const [traceListCollapsed, setTraceListCollapsed] = useState(
+    () => Boolean(locationService.getSearchObject()[URL_TRACE_KEY])
+  );
   const { width: traceListWidth, onMouseDown: onTraceListResize } = useResize(380, 160, 700);
 
   const [timeRange, setTimeRange] = useState<TimeRange>(() => {
@@ -73,8 +76,8 @@ export function TraceExplorer() {
   const firstDsLoadRef = useRef(true);
   // Tracks whether the user has made a real change in the QueryEditor
   const didMountTimeRangeRef = useRef(false);
-  // When a llt-traceId URL param is present on load, store it here so runSearch opens that
-  // specific trace after the search completes
+  // When a llt-traceId URL param is present, store it here so search can determine whether
+  // the directly opened trace belongs to the visible result list.
   const urlPreferredTraceRef = useRef<string | null>(null);
   // URL params read once at mount
   const urlParamsRef = useRef<{ datasourceUid?: string; traceId?: string } | null>(null);
@@ -100,8 +103,8 @@ export function TraceExplorer() {
     useDatasource(urlParamsRef.current?.datasourceUid);
 
   // Trace detail management
-  const { selectedTraceId, selectedTraceName, traceSpans, traceLoading, traceError, openTrace, openTraceRef, clearTrace } =
-    useOpenTrace(datasourceUid, isMountedRef);
+  const { selectedTraceId, selectedTraceName, traceSpans, traceLoading, traceError, openTrace, openTraceRef, updateTraceName, clearTrace } =
+    useOpenTrace(datasourceUid, timeRange.from.valueOf(), timeRange.to.valueOf(), isMountedRef);
 
   // Search management
   const {
@@ -124,6 +127,7 @@ export function TraceExplorer() {
     timeRange,
     query,
     openTraceRef,
+    updateTraceName,
     isMountedRef,
     urlPreferredTraceRef,
     onSearchStart: clearTrace,
@@ -160,10 +164,16 @@ export function TraceExplorer() {
       const urlTraceId = urlParamsRef.current?.traceId;
       if (urlTraceId) {
         urlPreferredTraceRef.current = urlTraceId;
+        void openTrace(urlTraceId).then(() => {
+          if (isMountedRef.current) {
+            handleRunQuery();
+          }
+        });
+      } else {
+        handleRunQuery();
       }
-      handleRunQuery();
     }
-  }, [ds, handleRunQuery]);
+  }, [ds, handleRunQuery, openTrace]);
 
   // Re-run search when time range changes (skip initial mount)
   useEffect(() => {
@@ -314,7 +324,7 @@ export function TraceExplorer() {
               placeholder="Select datasource..."
             />
           </div>
-          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: theme.spacing(1) }}>
+          <div style={{ marginLeft: 'auto', display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center', gap: theme.spacing(1) }}>
           <div className={styles.timePickerWrap}>
             <TimeRangePicker
               value={timeRange}
@@ -526,7 +536,7 @@ export function TraceExplorer() {
                 </div>
                 <div className={styles.traceMeta}>
                   <span className={styles.traceService}>{displayService}</span>
-                  <span>{formatDuration(trace.durationMs)}</span>
+                  <span style={{ flexShrink: 0 }}>{formatDuration(trace.durationMs)}</span>
                   <span>{formatTime(trace.startTimeUnixNano)}</span>
                   <button
                     className={`${styles.copyBtn} copy-btn`}
@@ -595,7 +605,7 @@ export function TraceExplorer() {
           </button>
         )}
 
-        <div className={styles.detailArea}>
+        <div className={styles.detailArea} style={{ minWidth: selectedTraceId ? TRACE_DETAIL_MIN_WIDTH : 0 }}>
           {selectedTraceId ? (
             <TraceDetailView
               traceId={selectedTraceId}

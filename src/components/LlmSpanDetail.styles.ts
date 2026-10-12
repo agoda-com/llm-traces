@@ -117,6 +117,8 @@ export const getStyles = (theme: GrafanaTheme2) => ({
     wordBreak: 'break-word',
     borderTop: `1px solid ${theme.colors.border.weak}`,
     color: theme.colors.text.primary,
+    maxHeight: '400px',
+    overflow: 'auto',
   }),
   roleSystem: css({
     background: theme.isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)',
@@ -129,6 +131,47 @@ export const getStyles = (theme: GrafanaTheme2) => ({
   }),
   roleTool: css({
     background: theme.isDark ? 'rgba(80,200,120,0.1)' : 'rgba(55,170,90,0.07)',
+  }),
+  partStack: css({
+    display: 'flex',
+    flexDirection: 'column',
+    gap: theme.spacing(0.75),
+  }),
+  partLabel: css({
+    color: theme.colors.text.secondary,
+    fontSize: '10px',
+    fontWeight: theme.typography.fontWeightMedium,
+    letterSpacing: '0.06em',
+    textTransform: 'uppercase',
+  }),
+  partMeta: css({
+    color: theme.colors.text.secondary,
+    fontSize: '10px',
+    fontFamily: theme.typography.fontFamilyMonospace,
+  }),
+  reasoningBlock: css({
+    padding: theme.spacing(1),
+    borderLeft: `2px solid ${theme.colors.warning.border}`,
+    background: theme.colors.background.secondary,
+  }),
+  toolResultBlock: css({
+    display: 'flex', minWidth: 0, flexDirection: 'column', gap: theme.spacing(0.75), padding: theme.spacing(1),
+    border: `1px solid ${theme.colors.success.border}`, borderRadius: theme.shape.radius.default,
+    background: theme.colors.success.transparent,
+  }),
+  structuredPartBlock: css({
+    padding: theme.spacing(1),
+    border: `1px solid ${theme.colors.border.weak}`,
+    borderRadius: theme.shape.radius.default,
+    background: theme.colors.background.secondary,
+  }),
+  structuredValue: css({
+    margin: 0,
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    color: theme.colors.text.secondary,
+    fontFamily: theme.typography.fontFamilyMonospace,
+    fontSize: theme.typography.bodySmall.fontSize,
   }),
   tokenRow: css({
     display: 'flex',
@@ -169,25 +212,47 @@ export const getStyles = (theme: GrafanaTheme2) => ({
     fontWeight: theme.typography.fontWeightMedium,
   }),
   toolCallBlock: css({
-    marginTop: theme.spacing(1),
-    padding: theme.spacing(1),
+    display: 'flex', minWidth: 0, flexDirection: 'column', gap: theme.spacing(0.75), padding: theme.spacing(1),
     background: theme.colors.background.secondary,
     borderRadius: theme.shape.radius.default,
     border: `1px solid ${theme.colors.border.weak}`,
   }),
-  toolCallName: css({
-    fontWeight: theme.typography.fontWeightMedium,
-    fontSize: theme.typography.bodySmall.fontSize,
-    marginBottom: theme.spacing(0.5),
-    color: theme.colors.text.link,
-    fontFamily: theme.typography.fontFamilyMonospace,
+  toolCardHeader: css({
+    display: 'flex', minWidth: 0, alignItems: 'center', gap: theme.spacing(0.75), flexWrap: 'wrap',
+    '& button': { marginLeft: 'auto' },
   }),
-  toolCallArgs: css({
-    fontFamily: theme.typography.fontFamilyMonospace,
-    fontSize: theme.typography.bodySmall.fontSize,
-    whiteSpace: 'pre-wrap',
-    wordBreak: 'break-word',
-    color: theme.colors.text.secondary,
+  toolCallName: css({
+    minWidth: 0, color: theme.colors.text.link, fontFamily: theme.typography.fontFamilyMonospace,
+    fontWeight: theme.typography.fontWeightMedium, overflowWrap: 'anywhere',
+  }),
+  toolResultName: css({
+    minWidth: 0, color: theme.colors.text.primary, fontFamily: theme.typography.fontFamilyMonospace,
+    fontWeight: theme.typography.fontWeightMedium, overflowWrap: 'anywhere',
+  }),
+  toolCorrelationChip: css({
+    maxWidth: '100%', padding: `1px ${theme.spacing(0.5)}`, overflow: 'hidden', color: theme.colors.text.secondary,
+    background: theme.colors.background.canvas, border: `1px solid ${theme.colors.border.weak}`,
+    borderRadius: theme.shape.radius.default, fontFamily: theme.typography.fontFamilyMonospace,
+    fontSize: '10px', textOverflow: 'ellipsis',
+  }),
+  toolCardDescription: css({ color: theme.colors.text.secondary, fontSize: theme.typography.bodySmall.fontSize }),
+  toolArgumentGrid: css({ display: 'flex', minWidth: 0, flexDirection: 'column', gap: theme.spacing(0.5), margin: 0 }),
+  toolArgumentRow: css({
+    display: 'grid', minWidth: 0, gridTemplateColumns: 'minmax(100px, 0.3fr) minmax(0, 1fr)', gap: theme.spacing(1),
+    '& dt': { color: theme.colors.text.secondary, fontFamily: theme.typography.fontFamilyMonospace },
+    '& dd': { minWidth: 0, margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: theme.typography.fontFamilyMonospace },
+  }),
+  toolArgumentStructured: css({ margin: 0, overflowX: 'auto', font: 'inherit', whiteSpace: 'pre' }),
+  toolResultPreview: css({ position: 'relative', minWidth: 0 }),
+  toolResultPreviewCollapsed: css({ maxHeight: '240px', overflow: 'hidden' }),
+  toolResultFade: css({
+    position: 'absolute', right: 0, bottom: 0, left: 0, height: '64px', pointerEvents: 'none',
+    background: `linear-gradient(to bottom, transparent, ${theme.colors.background.primary})`,
+  }),
+  toolResultToggle: css({
+    alignSelf: 'flex-start', padding: 0, color: theme.colors.text.link, background: 'transparent', border: 0,
+    cursor: 'pointer', fontWeight: theme.typography.fontWeightMedium,
+    '&:focus-visible': { outline: `2px solid ${theme.colors.primary.border}`, outlineOffset: '2px' },
   }),
   emptyContent: css({
     color: theme.colors.text.disabled,
@@ -200,6 +265,8 @@ export const getStyles = (theme: GrafanaTheme2) => ({
     wordBreak: 'break-word',
     borderTop: `1px solid ${theme.colors.border.weak}`,
     color: theme.colors.text.primary,
+    maxHeight: '400px',
+    overflow: 'auto',
     '& h1, & h2, & h3, & h4': {
       color: theme.colors.text.primary,
       fontWeight: theme.typography.fontWeightMedium,
@@ -285,5 +352,69 @@ export const getStyles = (theme: GrafanaTheme2) => ({
     color: theme.colors.text.secondary,
     marginBottom: theme.spacing(0.5),
     fontFamily: theme.typography.fontFamilyMonospace,
+  }),
+  toolCopyButton: css({
+    display: 'inline-flex', alignItems: 'center', gap: theme.spacing(0.25), padding: `0 ${theme.spacing(0.5)}`,
+    color: theme.colors.text.secondary, background: 'transparent', border: 0, cursor: 'pointer', fontSize: '11px',
+    '&:focus-visible': { outline: `2px solid ${theme.colors.primary.border}`, outlineOffset: '1px' },
+  }),
+  toolCatalog: css({ display: 'flex', flexDirection: 'column', gap: theme.spacing(1), minWidth: 0 }),
+  toolCatalogSearch: css({
+    width: '100%', padding: `${theme.spacing(0.75)} ${theme.spacing(1)}`, color: theme.colors.text.primary,
+    background: theme.colors.background.primary, border: `1px solid ${theme.colors.border.medium}`,
+    borderRadius: theme.shape.radius.default,
+    '&:focus-visible': { outline: `2px solid ${theme.colors.primary.border}`, outlineOffset: '1px' },
+  }),
+  toolCatalogEmpty: css({ color: theme.colors.text.secondary, fontStyle: 'italic', padding: theme.spacing(1) }),
+  toolDefinitionList: css({ display: 'flex', flexDirection: 'column', gap: theme.spacing(0.75) }),
+  toolDefinitionRow: css({
+    minWidth: 0, border: `1px solid ${theme.colors.border.weak}`, borderRadius: theme.shape.radius.default,
+    background: theme.colors.background.secondary, overflow: 'hidden',
+  }),
+  toolDefinitionButton: css({
+    display: 'flex', alignItems: 'flex-start', gap: theme.spacing(0.75), width: '100%', minWidth: 0,
+    padding: theme.spacing(1), color: theme.colors.text.primary, background: 'transparent', border: 0,
+    cursor: 'pointer', textAlign: 'left',
+    '&:focus-visible': { outline: `2px solid ${theme.colors.primary.border}`, outlineOffset: '-2px' },
+  }),
+  toolDefinitionSummary: css({ display: 'flex', flex: 1, minWidth: 0, flexDirection: 'column', gap: theme.spacing(0.5) }),
+  toolDefinitionTitleLine: css({ display: 'flex', alignItems: 'center', gap: theme.spacing(0.5), flexWrap: 'wrap' }),
+  toolDefinitionName: css({
+    color: theme.colors.text.link, fontFamily: theme.typography.fontFamilyMonospace,
+    fontWeight: theme.typography.fontWeightMedium,
+  }),
+  toolBadge: css({
+    padding: `1px ${theme.spacing(0.5)}`, color: theme.colors.text.secondary,
+    background: theme.colors.background.canvas, border: `1px solid ${theme.colors.border.weak}`,
+    borderRadius: theme.shape.radius.default, fontSize: '10px',
+  }),
+  toolDescriptionPreview: css({
+    overflow: 'hidden', color: theme.colors.text.secondary, fontSize: theme.typography.bodySmall.fontSize,
+    textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  }),
+  toolDefinitionBody: css({
+    display: 'flex', minWidth: 0, flexDirection: 'column', gap: theme.spacing(1), padding: theme.spacing(1),
+    borderTop: `1px solid ${theme.colors.border.weak}`, '& p': { margin: 0 },
+  }),
+  toolDefinitionActions: css({ display: 'flex', justifyContent: 'flex-end' }),
+  toolParameterTableWrapper: css({ maxWidth: '100%', overflowX: 'auto' }),
+  toolParameterTable: css({
+    width: '100%', minWidth: '720px', borderCollapse: 'collapse', fontSize: theme.typography.bodySmall.fontSize,
+    '& th, & td': {
+      padding: theme.spacing(0.5), borderBottom: `1px solid ${theme.colors.border.weak}`,
+      textAlign: 'left', verticalAlign: 'top', overflowWrap: 'break-word',
+    },
+    '& th': { color: theme.colors.text.secondary },
+    '& th:first-child, & td:first-child': { minWidth: '112px', whiteSpace: 'nowrap' },
+    '& th:nth-child(2), & td:nth-child(2)': { minWidth: '88px', whiteSpace: 'nowrap' },
+    '& th:nth-child(3), & td:nth-child(3)': { minWidth: '88px', whiteSpace: 'nowrap' },
+    '& td:first-child, & td:nth-child(2)': { fontFamily: theme.typography.fontFamilyMonospace },
+  }),
+  toolRawSchema: css({
+    minWidth: 0, '& summary': { cursor: 'pointer' }, '& button': { marginLeft: theme.spacing(0.5) },
+    '& pre': {
+      maxWidth: '100%', overflowX: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
+      fontFamily: theme.typography.fontFamilyMonospace, fontSize: theme.typography.bodySmall.fontSize,
+    },
   }),
 });

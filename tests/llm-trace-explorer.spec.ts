@@ -1,5 +1,6 @@
 import { test, expect, Page } from '@playwright/test';
-import { SEARCH_RESPONSE, TRACE_RESPONSE, VERTEX_TRACE_RESPONSE, OTEL_GENAI_TRACE_RESPONSE, GENERIC_TRACE_RESPONSE } from './fixtures/llm-trace';
+import { SEARCH_RESPONSE, TRACE_RESPONSE, VERTEX_TRACE_RESPONSE, OTEL_GENAI_TRACE_RESPONSE, GENERIC_TRACE_RESPONSE, STRUCTURED_SEARCH_RESPONSE, STRUCTURED_TRACE_RESPONSE } from './fixtures/llm-trace';
+import { waitForToolbarLayout } from './waitForToolbarLayout';
 
 const PLUGIN_URL = '/a/llm-traces-app';
 async function mockTempoApis(page: Page) {
@@ -44,12 +45,22 @@ test.describe('LLM Trace Explorer', () => {
     await expect(page.getByTestId('trace-detail-view')).toBeVisible();
   });
 
+  test('keeps span details readable at 1024px with the trace list expanded', async ({ page }) => {
+    await page.setViewportSize({ width: 1024, height: 768 });
+    await page.click('[data-testid^="trace-item-"]');
+
+    const spanListBox = await page.getByTestId('span-list-pane').boundingBox();
+    const detailBox = await page.getByTestId('span-detail-pane').boundingBox();
+
+    expect(spanListBox?.width).toBeGreaterThanOrEqual(300);
+    expect(detailBox?.width).toBeGreaterThanOrEqual(300);
+  });
+
   test('shows span list with correct span names', async ({ page }) => {
     await page.click('[data-testid^="trace-item-"]');
-    // process_query appears in trace list AND span list, use first()
-    await expect(page.getByText('process_query').first()).toBeVisible();
-    await expect(page.getByText('llm claude-sonnet-4-5').first()).toBeVisible();
-    await expect(page.getByText('get_property_details').first()).toBeVisible();
+    await expect(page.getByTestId('span-row-span0001')).toContainText('process_query');
+    await expect(page.getByTestId('span-row-span0002')).toContainText('llm claude-sonnet-4-5');
+    await expect(page.getByTestId('span-row-span0003')).toContainText('get_property_details');
   });
 
   test('auto-selects first LLM span and shows LLM detail', async ({ page }) => {
@@ -88,6 +99,7 @@ test.describe('LLM Trace Explorer', () => {
     // Click the LLM span which has a unicode-escaped attribute value
     await page.click('[data-testid="span-row-span0002"]');
     await expect(page.getByTestId('span-attrs-table')).toBeVisible();
+    await page.getByTestId('llm-attrs-toggle').click();
     // The llm.input_messages.1.message.content attribute value should render as Chinese
     await expect(page.getByTestId('span-attrs-table')).toContainText('请问酒店');
     await expect(page.getByTestId('span-attrs-table')).not.toContainText('\\u8bf7');
@@ -101,6 +113,51 @@ test.describe('LLM Trace Explorer', () => {
     await expect(page.getByTestId('span-attrs-table')).toContainText('sess_abc123');
     // No raw escape sequences appear in the table
     await expect(page.getByTestId('span-attrs-table')).not.toContainText('\\u');
+  });
+
+  test('attributes represented in the LLM view are collapsed into one expandable group', async ({ page }) => {
+    await page.click('[data-testid^="trace-item-"]');
+    const attributes = page.getByTestId('span-attrs-table');
+    const toggle = page.getByTestId('llm-attrs-toggle');
+
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(toggle).toContainText('LLM attributes shown above (14)');
+    await expect(attributes).not.toContainText('llm.input_messages.0.message.content');
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await expect(attributes).toContainText('llm.input_messages.0.message.content');
+    await expect(attributes).toContainText('You are an expert hotel concierge assistant');
+  });
+
+  test('unrelated attributes stay visible and ordinary spans do not gain an LLM group', async ({ page }) => {
+    await page.click('[data-testid^="trace-item-"]');
+
+    await page.click('[data-testid="span-row-span0001"]');
+    await expect(page.getByTestId('span-attrs-table')).toContainText('session.id');
+    await expect(page.getByTestId('span-attrs-table')).not.toContainText('input.value');
+    await expect(page.getByTestId('llm-attrs-toggle')).toContainText('LLM attributes shown above (3)');
+
+    await page.click('[data-testid="span-row-span0005"]');
+    await expect(page.getByTestId('llm-attrs-toggle')).toHaveCount(0);
+    await expect(page.getByTestId('span-attrs-table')).toContainText('http.method');
+    await expect(page.getByTestId('span-attrs-table')).toContainText('/api/hotels/12345');
+  });
+
+  test('expanded LLM attributes retain a readable value column at narrow widths', async ({ page }) => {
+    await page.setViewportSize({ width: 1024, height: 900 });
+    await page.click('[data-testid^="trace-item-"]');
+    await page.getByTestId('llm-attrs-toggle').click();
+
+    const keyCell = page.getByTestId('span-attrs-table')
+      .getByText('llm.output_messages.0.message.tool_calls', { exact: true });
+    const row = keyCell.locator('..');
+    const valueCell = row.locator('td').nth(1);
+    const [rowBox, valueBox] = await Promise.all([row.boundingBox(), valueCell.boundingBox()]);
+
+    expect(rowBox).not.toBeNull();
+    expect(valueBox).not.toBeNull();
+    expect(valueBox!.width).toBeGreaterThan(rowBox!.width * 0.45);
   });
 
   test('LLM detail shows Output section', async ({ page }) => {
@@ -136,8 +193,7 @@ test.describe('LLM Trace Explorer', () => {
     await page.click('[data-testid^="trace-item-"]');
     // Click the TOOL span
     await page.click('[data-testid="span-row-span0003"]');
-    // span name appears in both span row and detail header; use first()
-    await expect(page.getByText('get_property_details').first()).toBeVisible();
+    await expect(page.getByTestId('span-detail-panel')).toContainText('get_property_details');
     await expect(page.getByTestId('llm-span-detail')).not.toBeVisible();
   });
 
@@ -293,6 +349,30 @@ test.describe('LLM Trace Explorer', () => {
     await expect(systemBlock.getByText('You are an expert hotel concierge assistant')).toBeVisible();
   });
 
+  test('renders scalar tool messages as associated tool results', async ({ page }) => {
+    await page.click('[data-testid^="trace-item-"]');
+    await page.click('[data-testid="span-row-span0004"]');
+
+    const result = page.getByTestId('message-part-tool_result');
+    await expect(result).toContainText('Tool result');
+    await expect(result).toContainText('Grand Sukhumvit Bangkok');
+  });
+
+  test('keeps tool calls visible through the Markdown toggle cycle', async ({ page }) => {
+    await page.click('[data-testid^="trace-item-"]');
+    const assistantBlock = page.getByTestId('message-block-assistant');
+    await expect(assistantBlock.getByText('get_property_details', { exact: false })).toBeVisible();
+
+    const markdownToggle = assistantBlock.getByTitle('Render Markdown');
+    if (await markdownToggle.count() === 0) {
+      return;
+    }
+    await markdownToggle.click();
+    await expect(assistantBlock.getByText('get_property_details', { exact: false })).toBeVisible();
+    await assistantBlock.getByTitle('Show raw text').click();
+    await expect(assistantBlock.getByText('get_property_details', { exact: false })).toBeVisible();
+  });
+
   test('trace list pane is resizable by dragging the handle', async ({ page }) => {
     // Wait for auto-select to fully settle (span rows visible + network idle)
     await expect(page.locator('[data-testid^="span-row-"]').first()).toBeVisible();
@@ -341,6 +421,7 @@ test.describe('LLM Trace Explorer', () => {
   test('span list pane is resizable by dragging the handle', async ({ page }) => {
     await page.click('[data-testid^="trace-item-"]');
     await expect(page.getByTestId('trace-detail-view')).toBeVisible();
+    await page.getByRole('button', { name: 'Collapse trace list' }).click();
 
     const handle = page.getByTestId('resize-handle-span-list');
     const pane = page.getByTestId('span-list-pane');
@@ -382,6 +463,29 @@ test.describe('LLM Trace Explorer', () => {
 
     const after = await pane.boundingBox();
     expect(after!.width).toBeLessThan(before!.width - 50);
+  });
+
+  test('span list resize starts from its responsive capped width', async ({ page }) => {
+    await page.setViewportSize({ width: 1100, height: 768 });
+    await page.click('[data-testid^="trace-item-"]');
+
+    const handle = page.getByTestId('resize-handle-span-list');
+    const pane = page.getByTestId('span-list-pane');
+    const before = await pane.boundingBox();
+    const box = await handle.boundingBox();
+    const cx = box!.x + box!.width / 2;
+    const cy = box!.y + box!.height / 2;
+
+    await page.evaluate(({ x, y, dx }) => {
+      const el = document.querySelector('[data-testid="resize-handle-span-list"]') as HTMLElement;
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: x, clientY: y, buttons: 1 }));
+      document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: x + dx, clientY: y, buttons: 1 }));
+      document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x + dx, clientY: y }));
+    }, { x: cx, y: cy, dx: -80 });
+
+    const after = await pane.boundingBox();
+    expect(after!.width).toBeLessThan(before!.width - 50);
+    expect((await page.getByTestId('span-detail-pane').boundingBox())!.width).toBeGreaterThanOrEqual(300);
   });
 
   test('resize respects minimum width (trace list)', async ({ page }) => {
@@ -625,6 +729,7 @@ test.describe('LLM Trace Explorer', () => {
     const panel = page.getByTestId('span-detail-panel');
     // Before: no <pre> wrapping expanded JSON
     await expect(panel.locator('pre')).toHaveCount(0);
+    await page.getByTestId('llm-attrs-toggle').click();
     // Expand strings
     await page.click('[data-testid="expand-strings-btn"]');
     // span0002 has llm.invocation_parameters = '{"temperature":0.3,...}' → expands to <pre>
@@ -634,6 +739,7 @@ test.describe('LLM Trace Explorer', () => {
   test('expand-strings can be toggled back to raw values', async ({ page }) => {
     await page.click('[data-testid^="trace-item-"]');
     const panel = page.getByTestId('span-detail-panel');
+    await page.getByTestId('llm-attrs-toggle').click();
     await page.click('[data-testid="expand-strings-btn"]');
     await expect(panel.locator('pre').first()).toBeVisible();
     // Toggle off
@@ -961,6 +1067,7 @@ test.describe('LLM Trace Explorer', () => {
     });
     await page.goto(PLUGIN_URL);
     await page.waitForSelector('[data-testid="trace-explorer"]');
+    await waitForToolbarLayout(page);
     // Cap height so Grafana chrome differences between CI and local don't affect the snapshot
     await page.getByTestId('trace-explorer').evaluate((el) => {
       (el as HTMLElement).style.maxHeight = '900px';
@@ -1001,6 +1108,32 @@ test.describe('LLM Trace Explorer', () => {
       (el as HTMLElement).style.overflow = 'hidden';
     });
     await expect(page.getByTestId('params-section')).toHaveScreenshot('params-expanded.png');
+  });
+});
+
+test.describe('Structured OpenInference conversation', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route('**/api/datasources/proxy/uid/**/api/search**', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(STRUCTURED_SEARCH_RESPONSE) });
+    });
+    await page.route('**/api/datasources/proxy/uid/**/api/traces/**', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(STRUCTURED_TRACE_RESPONSE) });
+    });
+    await page.goto(PLUGIN_URL);
+    await page.waitForSelector('[data-testid="trace-explorer"]');
+  });
+
+  test('renders nested OpenInference text and flattened tool calls from the target trace', async ({ page }) => {
+    await page.click('[data-testid^="trace-item-"]');
+
+    const detail = page.getByTestId('llm-span-detail');
+    await expect(detail.getByText('example_user', { exact: false })).toBeVisible();
+    await expect(detail.getByText('Please look into ticket', { exact: false })).toBeVisible();
+    await expect(detail.getByText('transfer_to_agent', { exact: false })).toBeVisible();
+    await expect(detail.getByText('tooluse_example0001', { exact: false })).toBeVisible();
+    await expect(detail.getByTestId('message-part-tool_call')).toHaveCount(1);
+    await expect(detail.getByText('No arguments', { exact: true })).toBeVisible();
+    await expect(detail.getByText('(empty)')).toHaveCount(0);
   });
 });
 

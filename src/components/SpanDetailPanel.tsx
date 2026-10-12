@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useStyles2, useTheme2, Icon } from '@grafana/ui';
 import { getStyles } from './TraceDetail.styles';
 import { PluginSpan } from '../utils/tempoClient';
-import { decodeUnicodeEscapes } from '../utils/llmUtils';
+import { decodeUnicodeEscapes, extractLlmSpanData, getLlmDisplayAttributeKeys } from '../utils/llmUtils';
 import { formatDuration } from '../utils/formatUtils';
 import { LlmSpanDetail } from './LlmSpanDetail';
 
@@ -48,7 +48,20 @@ export function SpanDetailPanel({ span }: SpanDetailPanelProps) {
   const styles = useStyles2(getStyles);
   const theme = useTheme2();
   const [expandStrings, setExpandStrings] = useState(false);
+  const [expandedLlmAttributesForSpan, setExpandedLlmAttributesForSpan] = useState<string | null>(null);
   const spanStatus = getSpanStatus(span);
+  const llmData = useMemo(
+    () => extractLlmSpanData(span.tags, span.logs, span.operationName),
+    [span.tags, span.logs, span.operationName]
+  );
+  const llmAttributeKeys = useMemo(
+    () => getLlmDisplayAttributeKeys(span.tags, llmData),
+    [span.tags, llmData]
+  );
+  const attributeEntries = span.tags.map((tag, index) => ({ tag, index }));
+  const llmAttributeEntries = attributeEntries.filter(({ tag }) => llmAttributeKeys.has(tag.key));
+  const ordinaryAttributeEntries = attributeEntries.filter(({ tag }) => !llmAttributeKeys.has(tag.key));
+  const llmAttributesExpanded = expandedLlmAttributesForSpan === span.spanId;
 
   const renderValue = (value: unknown) => {
     const raw = decodeUnicodeEscapes(String(value));
@@ -83,7 +96,7 @@ export function SpanDetailPanel({ span }: SpanDetailPanelProps) {
       </div>
 
       {/* LLM / OpenInference view — rendered for LLM and non-LLM OI spans */}
-      <LlmSpanDetail tags={span.tags} logs={span.logs} operationName={span.operationName} />
+      <LlmSpanDetail tags={span.tags} llmData={llmData} />
 
       {/* Span attributes */}
       <div className={styles.sectionLabel} style={{ display: 'flex', alignItems: 'center' }}>
@@ -110,9 +123,35 @@ export function SpanDetailPanel({ span }: SpanDetailPanelProps) {
       <div className={styles.attrSection}>
         <table className={styles.attrTable} data-testid="span-attrs-table">
           <tbody>
-            {/* BUG-056: use index in key to avoid duplicate-key collision */}
-            {span.tags.map((tag, i) => (
-              <tr key={`${tag.key}-${i}`} className={styles.attrRow}>
+            {llmAttributeEntries.length > 0 && (
+              <tr className={styles.attrGroupRow}>
+                <td colSpan={2} className={styles.attrGroupCell}>
+                  <button
+                    type="button"
+                    className={styles.attrGroupToggle}
+                    data-testid="llm-attrs-toggle"
+                    aria-expanded={llmAttributesExpanded}
+                    onClick={() => setExpandedLlmAttributesForSpan(llmAttributesExpanded ? null : span.spanId)}
+                  >
+                    <Icon name={llmAttributesExpanded ? 'angle-down' : 'angle-right'} size="xs" />
+                    <span className={styles.attrGroupLabel}>
+                      LLM attributes shown above ({llmAttributeEntries.length})
+                    </span>
+                    <span className={styles.attrGroupAction}>
+                      {llmAttributesExpanded ? 'Hide raw values' : 'Show raw values'}
+                    </span>
+                  </button>
+                </td>
+              </tr>
+            )}
+            {llmAttributesExpanded && llmAttributeEntries.map(({ tag, index }) => (
+              <tr key={`${tag.key}-${index}`} className={`${styles.attrRow} ${styles.promotedAttrRow}`}>
+                <td className={styles.attrKey}>{tag.key}</td>
+                <td className={styles.attrValue}>{renderValue(tag.value)}</td>
+              </tr>
+            ))}
+            {ordinaryAttributeEntries.map(({ tag, index }) => (
+              <tr key={`${tag.key}-${index}`} className={styles.attrRow}>
                 <td className={styles.attrKey}>{tag.key}</td>
                 <td className={styles.attrValue}>{renderValue(tag.value)}</td>
               </tr>

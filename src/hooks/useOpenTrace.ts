@@ -7,14 +7,17 @@ export interface UseOpenTraceResult {
   traceSpans: PluginSpan[] | null;
   traceLoading: boolean;
   traceError: string | null;
-  openTrace: (traceId: string, traceName?: string) => void;
-  openTraceRef: React.MutableRefObject<((id: string, name?: string) => void) | null>;
+  openTrace: (traceId: string, traceName?: string) => Promise<void>;
+  openTraceRef: React.MutableRefObject<((id: string, name?: string) => Promise<void>) | null>;
+  updateTraceName: (traceId: string, traceName: string) => void;
   /** Reset all trace state — call at the start of a new search to clear the detail pane */
   clearTrace: () => void;
 }
 
 export function useOpenTrace(
   datasourceUid: string | null,
+  rangeStartMs: number,
+  rangeEndMs: number,
   isMountedRef: React.MutableRefObject<boolean>
 ): UseOpenTraceResult {
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
@@ -22,10 +25,12 @@ export function useOpenTrace(
   const [traceSpans, setTraceSpans] = useState<PluginSpan[] | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
   const [traceError, setTraceError] = useState<string | null>(null);
+  const selectedTraceIdRef = useRef<string | null>(null);
   const openTraceRequestIdRef = useRef(0);
-  const openTraceRef = useRef<((id: string, name?: string) => void) | null>(null);
+  const openTraceRef = useRef<((id: string, name?: string) => Promise<void>) | null>(null);
 
   const clearTrace = useCallback(() => {
+    selectedTraceIdRef.current = null;
     setSelectedTraceId(null);
     setSelectedTraceName(null);
     setTraceSpans(null);
@@ -33,6 +38,7 @@ export function useOpenTrace(
   }, []);
 
   const openTrace = useCallback(async (traceId: string, traceName?: string) => {
+    selectedTraceIdRef.current = traceId;
     setSelectedTraceId(traceId);
     setSelectedTraceName(traceName || traceId);
     setTraceSpans(null);
@@ -45,7 +51,22 @@ export function useOpenTrace(
     setTraceLoading(true);
     const requestId = ++openTraceRequestIdRef.current;
     try {
-      const spans = await fetchTrace(datasourceUid, traceId);
+      let spans: PluginSpan[];
+      try {
+        spans = await fetchTrace(datasourceUid, traceId, rangeStartMs, rangeEndMs);
+      } catch (err) {
+        const responseError = err as {
+          status?: number;
+          statusCode?: number;
+          data?: { status?: number; statusCode?: number };
+        };
+        const status = responseError?.status ?? responseError?.statusCode ??
+          responseError?.data?.status ?? responseError?.data?.statusCode;
+        if (status !== 404) {
+          throw err;
+        }
+        spans = await fetchTrace(datasourceUid, traceId);
+      }
       if (requestId !== openTraceRequestIdRef.current) { return; }
       if (!isMountedRef.current) { return; } // BUG-052
       setTraceSpans(spans);
@@ -61,10 +82,16 @@ export function useOpenTrace(
         }
       }
     }
-  }, [datasourceUid, isMountedRef]);
+  }, [datasourceUid, rangeStartMs, rangeEndMs, isMountedRef]);
+
+  const updateTraceName = useCallback((traceId: string, traceName: string) => {
+    if (selectedTraceIdRef.current === traceId) {
+      setSelectedTraceName(traceName);
+    }
+  }, []);
 
   // Keep the ref current so runSearch can call the latest openTrace
   openTraceRef.current = openTrace;
 
-  return { selectedTraceId, selectedTraceName, traceSpans, traceLoading, traceError, openTrace, openTraceRef, clearTrace };
+  return { selectedTraceId, selectedTraceName, traceSpans, traceLoading, traceError, openTrace, openTraceRef, updateTraceName, clearTrace };
 }

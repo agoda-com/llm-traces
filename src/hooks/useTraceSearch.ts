@@ -20,7 +20,8 @@ interface UseTraceSearchParams {
   dsRef: React.MutableRefObject<DataSourceApi | null>;
   timeRange: TimeRange;
   query: TempoLikeQuery;
-  openTraceRef: React.MutableRefObject<((id: string, name?: string) => void) | null>;
+  openTraceRef: React.MutableRefObject<((id: string, name?: string) => Promise<void>) | null>;
+  updateTraceName: (traceId: string, traceName: string) => void;
   isMountedRef: React.MutableRefObject<boolean>;
   urlPreferredTraceRef: React.MutableRefObject<string | null>;
   /** Called at the start of each search to clear selected trace state */
@@ -50,6 +51,7 @@ export function useTraceSearch({
   timeRange,
   query,
   openTraceRef,
+  updateTraceName,
   isMountedRef,
   urlPreferredTraceRef,
   onSearchStart,
@@ -69,7 +71,11 @@ export function useTraceSearch({
       setSearchLoading(false);
       return;
     }
-    onSearchStart();
+    const preferredId = urlPreferredTraceRef.current;
+    urlPreferredTraceRef.current = null;
+    if (!preferredId) {
+      onSearchStart();
+    }
     setSearchLoading(true);
     setSearchError(null);
     setTraces([]);
@@ -79,16 +85,15 @@ export function useTraceSearch({
     try {
       const end = timeRange.to.valueOf();
       const start = timeRange.from.valueOf();
-      const results = await searchTraces(datasourceUid, traceQL, start, end, 30);
+      const limit = query.limit ?? 20;
+      const results = await searchTraces(datasourceUid, traceQL, start, end, limit, query.spss ?? 3);
       if (requestId !== searchRequestIdRef.current) { return; }
       if (!isMountedRef.current) { return; } // BUG-052
       results.sort((a, b) => Number(BigInt(b.startTimeUnixNano) - BigInt(a.startTimeUnixNano)));
       setTraces(results);
       setErrorsOnly(false);
-      // If a URL-preferred trace was set (from llt-traceId on initial load), open that trace.
-      // Otherwise auto-select the first result so the detail panel is never empty.
-      const preferredId = urlPreferredTraceRef.current;
-      urlPreferredTraceRef.current = null;
+      // A URL-preferred trace opens independently of search. Search only determines whether
+      // it belongs to the visible result list; otherwise select the first result.
       if (preferredId) {
         const match = results.find((r) => r.traceID === preferredId);
         if (match) {
@@ -96,13 +101,9 @@ export function useTraceSearch({
             ? extractNamesFromSpanSets(match) : null;
           const displayName = match.rootTraceName || spanSetFallback?.name || match.traceID;
           const displayService = match.rootServiceName || spanSetFallback?.service || '';
-          openTraceRef.current?.(match.traceID, displayService ? `${displayService} · ${displayName}` : displayName);
-          setIsDeepLinkedTraceOutsideResults(false);
-        } else {
-          // BUG-054: trace not in current search window — open it directly but flag the UI
-          setIsDeepLinkedTraceOutsideResults(true);
-          openTraceRef.current?.(preferredId, preferredId);
+          updateTraceName(preferredId, displayService ? `${displayService} · ${displayName}` : displayName);
         }
+        setIsDeepLinkedTraceOutsideResults(!match);
       } else if (results.length > 0) {
         const first = results[0];
         const spanSetFallback = (!first.rootTraceName || !first.rootServiceName)
@@ -124,7 +125,7 @@ export function useTraceSearch({
         }
       }
     }
-  }, [datasourceUid, timeRange, onSearchStart, openTraceRef, isMountedRef, urlPreferredTraceRef]);
+  }, [datasourceUid, timeRange, query.limit, query.spss, onSearchStart, openTraceRef, updateTraceName, isMountedRef, urlPreferredTraceRef]);
 
   const loadMoreTraces = useCallback(async () => {
     if (!datasourceUid || loadingMore || !hasMoreTraces || !dsRef.current) { return; }
@@ -138,11 +139,12 @@ export function useTraceSearch({
     const endMs = Number(BigInt(oldest.startTimeUnixNano) / 1_000_000n) - 1000;
     const startMs = timeRange.from.valueOf();
     const traceQL = tempoQueryToTraceQL(query, dsRef.current);
+    const limit = query.limit ?? 20;
     setLoadingMore(true);
     try {
-      const results = await searchTraces(datasourceUid, traceQL, startMs, endMs, 30);
+      const results = await searchTraces(datasourceUid, traceQL, startMs, endMs, limit, query.spss ?? 3);
       if (!isMountedRef.current) { return; }
-      if (results.length < 30) { setHasMoreTraces(false); }
+      if (results.length < limit) { setHasMoreTraces(false); }
       const existingIds = new Set(traces.map((t) => t.traceID));
       const newTraces = results.filter((t) => !existingIds.has(t.traceID));
       if (newTraces.length > 0) {

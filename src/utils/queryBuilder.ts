@@ -28,6 +28,8 @@ export interface TempoLikeQuery {
   refId: string;
   queryType?: string;
   query?: string; // traceql mode
+  limit?: number;
+  spss?: number;
   filters?: Array<{
     id: string;
     tag?: string;

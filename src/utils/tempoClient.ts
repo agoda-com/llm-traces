@@ -286,9 +286,10 @@ export async function searchTraces(
   query: string,
   start: number,
   end: number,
-  limit = 20
+  limit = 20,
+  spss = 3
 ): Promise<TempoTraceSearchResult[]> {
-  const params: Record<string, string | number> = { limit };
+  const params: Record<string, string | number> = { limit, spss };
   if (query) {
     params.q = query;
   }
@@ -310,9 +311,18 @@ export async function searchTraces(
   return response?.traces || [];
 }
 
-export async function fetchTrace(datasourceUid: string, traceId: string): Promise<PluginSpan[]> {
+export async function fetchTrace(
+  datasourceUid: string,
+  traceId: string,
+  start?: number,
+  end?: number
+): Promise<PluginSpan[]> {
+  const params: Record<string, number> = {};
+  if (start !== undefined) { params.start = Math.floor(start / 1000); }
+  if (end !== undefined) { params.end = Math.floor(end / 1000); }
   const data = await getBackendSrv().get<unknown>(
-    `/api/datasources/proxy/uid/${datasourceUid}/api/traces/${traceId}`
+    `/api/datasources/proxy/uid/${datasourceUid}/api/traces/${traceId}`,
+    Object.keys(params).length ? params : undefined
   );
   // BUG-061 fix: validate response for Tempo error bodies like {"error": "trace not found"}.
   const errMsg = (data as any)?.error || (data as any)?.message;

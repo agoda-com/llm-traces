@@ -35,27 +35,33 @@ const LLM_FILTER_ATTRS = [
  * Set up Tempo API mocks and return a collector for search request URLs so
  * tests can inspect the query parameters that were actually sent.
  */
-async function mockTempoWithCapture(page: Page): Promise<{ searchUrls: URL[] }> {
+async function mockTempoWithCapture(
+  page: Page,
+  traceResponse: unknown = TRACE_RESPONSE,
+  searchResponse: unknown = SEARCH_RESPONSE
+): Promise<{ searchUrls: URL[]; traceUrls: URL[] }> {
   const searchUrls: URL[] = [];
+  const traceUrls: URL[] = [];
 
   await page.route('**/api/datasources/proxy/uid/**/api/search**', async (route, request) => {
     searchUrls.push(new URL(request.url()));
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(SEARCH_RESPONSE),
+      body: JSON.stringify(searchResponse),
     });
   });
 
-  await page.route('**/api/datasources/proxy/uid/**/api/traces/**', async (route) => {
+  await page.route('**/api/datasources/proxy/uid/**/api/traces/**', async (route, request) => {
+    traceUrls.push(new URL(request.url()));
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(TRACE_RESPONSE),
+      body: JSON.stringify(traceResponse),
     });
   });
 
-  return { searchUrls };
+  return { searchUrls, traceUrls };
 }
 
 /** Wait for the trace list to be populated after an auto-search. */
@@ -123,6 +129,37 @@ test.describe('Bug fix — initial LLM query not cleared by QueryEditor mount', 
     ).toBe(true);
   });
 
+  test('Tempo search uses the limit and spans-per-span-set from the saved query', async ({ page }) => {
+    const { searchUrls } = await mockTempoWithCapture(page);
+    const savedQuery = {
+      refId: 'A',
+      queryType: 'traceqlSearch',
+      query: `{${LLM_FILTER_ATTRS.map((attr) => `${attr} != \"\"`).join(' || ')}}`,
+      limit: 13,
+      spss: 7,
+      filters: [
+        { id: 'empty', operator: '=', scope: 'span' },
+        {
+          id: 'service-name',
+          operator: '=',
+          scope: 'resource',
+          tag: 'service.name',
+          value: ['my-agent-service'],
+          valueType: 'string',
+          isCustomValue: false,
+        },
+      ],
+    };
+
+    await page.goto(`${PLUGIN_URL}?llt-query=${encodeURIComponent(JSON.stringify(savedQuery))}`);
+    await waitForTraces(page);
+
+    const firstRequest = searchUrls[0];
+    expect(firstRequest.searchParams.get('q')).toBe('{resource.service.name="my-agent-service"}');
+    expect(firstRequest.searchParams.get('limit')).toBe('13');
+    expect(firstRequest.searchParams.get('spss')).toBe('7');
+  });
+
   // -------------------------------------------------------------------------
   // Bug 2: trace items must appear in the left column on initial page load
   // -------------------------------------------------------------------------
@@ -176,7 +213,11 @@ test.describe('Bug fix — initial LLM query not cleared by QueryEditor mount', 
     await page.goto(`${PLUGIN_URL}?llt-traceId=${fakeTraceId}`);
     await page.waitForSelector('[data-testid="trace-explorer"]');
 
-    // The trace list MUST be populated — search must have run
+    // Direct trace entry keeps the trace list collapsed so detail remains readable.
+    await expect(page.getByRole('button', { name: 'Expand trace list' })).toBeVisible();
+    await page.getByRole('button', { name: 'Expand trace list' }).click();
+
+    // The restored trace list MUST be populated - search must have run.
     await expect(
       page.getByTestId('trace-list-pane').locator('[data-testid^="trace-item-"]').first(),
       'No trace items rendered when llt-traceId param is present'
@@ -189,6 +230,37 @@ test.describe('Bug fix — initial LLM query not cleared by QueryEditor mount', 
     const firstQ = searchUrls[0].searchParams.get('q') ?? '';
     const hasFilter = LLM_FILTER_ATTRS.some((attr) => firstQ.includes(attr));
     expect(hasFilter, `Search with llt-traceId missing LLM filter — got q="${firstQ}"`).toBe(true);
+  });
+
+  test('trace lookup uses the selected time range and retries unbounded on 404', async ({ page }) => {
+    const traceUrls: URL[] = [];
+    const from = '1970-01-01T00:00:00.000Z';
+    const to = '2026-09-17T04:00:33.000Z';
+
+    await page.route('**/api/datasources/proxy/uid/**/api/search**', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(SEARCH_RESPONSE) });
+    });
+    await page.route('**/api/datasources/proxy/uid/**/api/traces/**', async (route, request) => {
+      const url = new URL(request.url());
+      traceUrls.push(url);
+      if (url.searchParams.has('start')) {
+        await route.fulfill({ status: 404, contentType: 'application/json', body: '{"message":"trace not found"}' });
+      } else {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(TRACE_RESPONSE) });
+      }
+    });
+
+    await page.goto(
+      `${PLUGIN_URL}?llt-from=${encodeURIComponent(from)}&llt-to=${encodeURIComponent(to)}` +
+      `&llt-traceId=${SEARCH_RESPONSE.traces[0].traceID}`
+    );
+
+    await expect(page.getByTestId('span-list-pane')).toBeVisible({ timeout: 10_000 });
+    expect(traceUrls).toHaveLength(2);
+    expect(traceUrls[0].searchParams.get('start')).toBe(String(Date.parse(from) / 1000));
+    expect(traceUrls[0].searchParams.get('end')).toBe(String(Date.parse(to) / 1000));
+    expect(traceUrls[1].searchParams.has('start')).toBe(false);
+    expect(traceUrls[1].searchParams.has('end')).toBe(false);
   });
 
   // -------------------------------------------------------------------------
@@ -597,6 +669,34 @@ test.describe('SpanRow and TraceSummaryBar bug fixes', () => {
 // LlmSpanDetail bug fixes — BUG-018, BUG-019, BUG-021
 // ---------------------------------------------------------------------------
 test.describe('LlmSpanDetail bug fixes', () => {
+  for (const [label, content] of [
+    ['literal', '<|im_start|> system prompt'],
+    ['Unicode-escaped', String.raw`\u003c|im_start|\u003e system prompt`],
+  ]) {
+    test(`${label} special-token markers do not crash message rendering`, async ({ page }) => {
+      const traceResponse = JSON.parse(JSON.stringify(TRACE_RESPONSE));
+      const llmSpan = traceResponse.resourceSpans[0].scopeSpans[0].spans.find(
+        (span: { spanId: string }) => span.spanId === 'span0002'
+      );
+      const messageContent = llmSpan.attributes.find(
+        (attribute: { key: string }) => attribute.key === 'llm.input_messages.0.message.content'
+      );
+      messageContent.value.stringValue = content;
+
+      const pageErrors: string[] = [];
+      page.on('pageerror', (error) => pageErrors.push(error.message));
+      await mockTempoWithCapture(page, traceResponse);
+      await page.goto(PLUGIN_URL);
+      await waitForTraces(page);
+      await page.getByTestId('span-row-span0002').click();
+
+      const systemMessage = page.getByTestId('message-block-system').first();
+      await expect(systemMessage).toContainText('<|im_start|> system prompt');
+      await expect(systemMessage).toContainText(/~[\d,]+ tokens/);
+      expect(pageErrors).not.toContain('Disallowed special token found: <|im_start|>');
+    });
+  }
+
   // -------------------------------------------------------------------------
   // BUG-018: content_filter finish reason must show an orange badge, not green
   // -------------------------------------------------------------------------

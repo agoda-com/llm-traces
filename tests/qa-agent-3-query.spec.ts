@@ -50,7 +50,8 @@ test('02 · initial search request uses LLM filter (not bare {})', async ({ page
   const tempoSearchUrls: string[] = [];
   page.on('request', (req) => {
     const url = req.url();
-    if (url.includes('/api/datasources/proxy/') && url.includes('/api/search')) {
+    const pathname = new URL(url).pathname;
+    if (pathname.includes('/api/datasources/proxy/') && pathname.endsWith('/api/search')) {
       tempoSearchUrls.push(url);
     }
   });

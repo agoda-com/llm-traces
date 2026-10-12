@@ -15,6 +15,7 @@
  */
 
 import { test, expect, Page } from '@playwright/test';
+import { waitForToolbarLayout } from './waitForToolbarLayout';
 
 const PLUGIN_URL = '/a/llm-traces-app';
 
@@ -65,12 +66,7 @@ async function setupPage(page: Page, traceBody = BIG_TRACE) {
 
   await page.goto(PLUGIN_URL);
   await page.waitForSelector('[data-testid="trace-list-pane"]', { timeout: 15000 });
-  // Wait for toolbar (query editor) to fully render
-  await page.waitForFunction(() => {
-    const t = document.querySelector('[data-testid="plugin-toolbar"]') as HTMLElement | null;
-    return t && t.getBoundingClientRect().height > 50;
-  }, { timeout: 10000 });
-  await page.waitForTimeout(400); // body-height useLayoutEffect re-runs after toolbar settles
+  await waitForToolbarLayout(page);
   await page.evaluate(() => window.scrollTo(0, 0));
 }
 

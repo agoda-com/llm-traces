@@ -1,6 +1,12 @@
 import { css } from '@emotion/css';
 import type { GrafanaTheme2 } from '@grafana/data';
 
+export const SPAN_LIST_MIN_WIDTH = 330;
+export const SPAN_DETAIL_MIN_WIDTH = 300;
+const RESIZE_HANDLE_WIDTH = 5;
+export const SPAN_DETAIL_RESERVED_WIDTH = SPAN_DETAIL_MIN_WIDTH + RESIZE_HANDLE_WIDTH;
+export const TRACE_DETAIL_MIN_WIDTH = SPAN_LIST_MIN_WIDTH + SPAN_DETAIL_RESERVED_WIDTH;
+
 export const getStyles = (theme: GrafanaTheme2) => ({
   root: css({
     display: 'flex',
@@ -55,7 +61,7 @@ export const getStyles = (theme: GrafanaTheme2) => ({
     flexShrink: 0,
   }),
   resizeHandle: css({
-    width: '5px',
+    width: `${RESIZE_HANDLE_WIDTH}px`,
     flexShrink: 0,
     cursor: 'col-resize',
     position: 'relative',
@@ -104,9 +110,16 @@ export const getStyles = (theme: GrafanaTheme2) => ({
     top: 0,
     zIndex: 1,
   }),
-  colName: css({ flex: 1 }),
-  colDuration: css({ width: '70px', textAlign: 'right' }),
-  colBar: css({ width: '140px', marginLeft: theme.spacing(1) }),
+  colName: css({ flex: 1, paddingRight: theme.spacing(1) }),
+  colDuration: css({ width: '70px', flexShrink: 0, textAlign: 'right' }),
+  colBar: css({
+    flex: '0 1 140px',
+    minWidth: '40px',
+    marginLeft: theme.spacing(1),
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  }),
   spanFilterRow: css({
     display: 'flex',
     alignItems: 'center',
@@ -187,17 +200,58 @@ export const getStyles = (theme: GrafanaTheme2) => ({
     width: '100%',
     fontSize: theme.typography.bodySmall.fontSize,
     borderCollapse: 'collapse',
+    tableLayout: 'fixed',
   }),
   attrRow: css({
     '&:hover': { background: theme.colors.action.hover },
+  }),
+  attrGroupRow: css({
+    borderBottom: `1px solid ${theme.colors.border.weak}`,
+  }),
+  attrGroupCell: css({
+    padding: 0,
+  }),
+  attrGroupToggle: css({
+    alignItems: 'center',
+    background: theme.colors.background.secondary,
+    border: 0,
+    color: theme.colors.text.secondary,
+    cursor: 'pointer',
+    display: 'flex',
+    fontFamily: theme.typography.fontFamilyMonospace,
+    fontSize: theme.typography.bodySmall.fontSize,
+    gap: theme.spacing(0.75),
+    padding: `${theme.spacing(0.75)} ${theme.spacing(1)}`,
+    textAlign: 'left',
+    width: '100%',
+    '&:hover': {
+      background: theme.colors.action.hover,
+      color: theme.colors.text.primary,
+    },
+    '&:focus-visible': {
+      outline: `2px solid ${theme.colors.primary.border}`,
+      outlineOffset: '-2px',
+    },
+  }),
+  attrGroupLabel: css({
+    color: theme.colors.text.primary,
+    fontWeight: theme.typography.fontWeightMedium,
+  }),
+  attrGroupAction: css({
+    marginLeft: 'auto',
+    whiteSpace: 'nowrap',
+  }),
+  promotedAttrRow: css({
+    background: theme.colors.background.secondary,
   }),
   attrKey: css({
     padding: `${theme.spacing(0.25)} ${theme.spacing(0.75)} ${theme.spacing(0.25)} 0`,
     color: theme.colors.text.secondary,
     verticalAlign: 'top',
-    whiteSpace: 'nowrap',
     fontFamily: theme.typography.fontFamilyMonospace,
     width: '45%',
+    wordBreak: 'break-word',
+    overflowWrap: 'anywhere',
   }),
   attrValue: css({
     padding: `${theme.spacing(0.25)} 0`,

@@ -25,3 +25,17 @@ export function formatTime(nanoStr: string): string {
     );
   } catch { return ''; }
 }
+
+const MAX_COMPACT_ARRAY_LENGTH = 80;
+
+/**
+ * Format an array of primitives on one line, e.g. `["a", "b"]`, so it can wrap between items.
+ * Returns undefined for non-arrays, arrays containing objects or arrays, and arrays longer than the limit.
+ */
+export function formatCompactArray(value: unknown): string | undefined {
+  if (!Array.isArray(value) || value.some((item) => typeof item === 'object' && item !== null)) {
+    return undefined;
+  }
+  const compact = `[${value.map((item) => JSON.stringify(item)).join(', ')}]`;
+  return compact.length <= MAX_COMPACT_ARRAY_LENGTH ? compact : undefined;
+}

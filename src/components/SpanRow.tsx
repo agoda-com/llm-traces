@@ -1,3 +1,5 @@
+import { memo } from 'react';
+
 import { css } from '@emotion/css';
 import { GrafanaTheme2 } from '@grafana/data';
 import { useStyles2, Icon } from '@grafana/ui';
@@ -14,6 +16,8 @@ const getStyles = (theme: GrafanaTheme2) => ({
     cursor: 'pointer',
     borderBottom: `1px solid ${theme.colors.border.weak}`,
     minHeight: '36px',
+    contentVisibility: 'auto',
+    containIntrinsicSize: '36px',
     '&:hover': {
       background: theme.colors.action.hover,
     },
@@ -26,8 +30,9 @@ const getStyles = (theme: GrafanaTheme2) => ({
     flexShrink: 0,
   }),
   nameCol: css({
-    flex: 1,
+    flex: '1 0 140px',
     minWidth: 0,
+    overflow: 'hidden',
     display: 'flex',
     alignItems: 'center',
     gap: theme.spacing(0.75),
@@ -42,7 +47,11 @@ const getStyles = (theme: GrafanaTheme2) => ({
   serviceName: css({
     fontSize: '11px',
     color: theme.colors.text.secondary,
-    flexShrink: 0,
+    // Gives up its space long before the span name does.
+    flexShrink: 1000,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
   }),
   kindBadge: css({
     fontSize: '10px',
@@ -67,9 +76,9 @@ const getStyles = (theme: GrafanaTheme2) => ({
     fontFamily: theme.typography.fontFamilyMonospace,
   }),
   barCol: css({
-    width: '140px',
+    flex: '0 1 140px',
+    minWidth: '40px',
     height: '16px',
-    flexShrink: 0,
     marginLeft: theme.spacing(1),
     position: 'relative',
   }),
@@ -127,7 +136,7 @@ interface SpanRowProps {
   displayDepth?: number;
 }
 
-export function SpanRow({ span, isSelected, isExpanded, onToggleExpand, onClick, traceStartMs, traceDurationMs, displayDepth }: SpanRowProps) {
+export const SpanRow = memo(function SpanRow({ span, isSelected, isExpanded, onToggleExpand, onClick, traceStartMs, traceDurationMs, displayDepth }: SpanRowProps) {
   const styles = useStyles2(getStyles);
   const agentName = getAgentName(span.tags);
   const kindValue = getSpanKind(span.tags);
@@ -207,4 +216,4 @@ export function SpanRow({ span, isSelected, isExpanded, onToggleExpand, onClick,
       </div>
     </div>
   );
-}
+});

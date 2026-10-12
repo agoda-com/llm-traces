@@ -3,7 +3,7 @@ import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } fr
 import { useResize } from '../utils/useResize';
 
 import { useStyles2, useTheme2, Alert, Icon } from '@grafana/ui';
-import { getStyles } from './TraceDetail.styles';
+import { getStyles, SPAN_DETAIL_RESERVED_WIDTH, SPAN_LIST_MIN_WIDTH } from './TraceDetail.styles';
 
 import { PluginSpan, flattenTree, getTraceDurationMs, getTraceStartMs } from '../utils/tempoClient';
 import { isLlmSpan, isGuardrailSpan, isAiSpan, extractLlmSpanData } from '../utils/llmUtils';
@@ -47,7 +47,7 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
   const [listPaneOpen, setListPaneOpen] = useState(true);
   // BUG-077: flag set by Escape to prevent auto-re-selection via firstLlmSpan
   const [userDismissedDetail, setUserDismissedDetail] = useState(false);
-  const { width: spanListWidth, onMouseDown: onSpanListResize } = useResize(500, 150, 900);
+  const { width: spanListWidth, onMouseDown: onSpanListResize } = useResize(500, SPAN_LIST_MIN_WIDTH, 900);
   const displayedSpansRef = useRef<PluginSpan[]>([]);
   const effectiveSelectedRef = useRef<string | null>(null);
 
@@ -94,6 +94,11 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
 
   const handleExpandAll = useCallback(() => {
     setCollapsed(new Set());
+  }, []);
+
+  const handleSelectSpan = useCallback((span: PluginSpan) => {
+    setUserDismissedDetail(false);
+    setSelectedSpanId(span.spanId);
   }, []);
 
   // Scroll selected span into view when selection changes
@@ -452,7 +457,11 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
             <div
               className={styles.spanListPane}
               data-testid="span-list-pane"
-              style={{ width: detailPaneOpen ? spanListWidth : '100%' }}
+              style={{
+                width: detailPaneOpen ? spanListWidth : '100%',
+                minWidth: detailPaneOpen ? SPAN_LIST_MIN_WIDTH : undefined,
+                maxWidth: detailPaneOpen ? `calc(100% - ${SPAN_DETAIL_RESERVED_WIDTH}px)` : undefined,
+              }}
             >
               <div className={styles.columnHeader}>
                 <span className={styles.colName}>Span</span>
@@ -609,11 +618,7 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
                     isSelected={span.spanId === effectiveSelectedSpanId}
                     isExpanded={!collapsed.has(span.spanId)}
                     onToggleExpand={handleToggleExpand}
-                    onClick={(s) => {
-                      // BUG-077: reset dismissed flag on explicit click
-                      setUserDismissedDetail(false);
-                      setSelectedSpanId(s.spanId);
-                    }}
+                    onClick={handleSelectSpan}
                     traceStartMs={traceStartMs}
                     traceDurationMs={traceDurationMs}
                     displayDepth={aiOnly ? (span.depth ?? 0) - minAiDepth : undefined}

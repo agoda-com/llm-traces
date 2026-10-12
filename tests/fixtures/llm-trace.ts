@@ -171,23 +171,23 @@ export const TRACE_RESPONSE = {
               status: { code: 'STATUS_CODE_ERROR', message: 'Connection timeout after 100ms' },
               events: [],
             },
-            // GUARDRAIL span — genai-gateway policy check (mirrors real production attribute names)
+            // GUARDRAIL span - policy check using OpenInference guardrail attributes
             // Rendered as LLM panel because guardrails invoke an LLM internally.
             {
               traceId: TRACE_ID,
               spanId: 'span0008',
               parentSpanId: 'span0001',
-              name: 'guardrail no_internal_system_disclosure',
+              name: 'guardrail no_prompt_disclosure',
               startTimeUnixNano: t(40),
               endTimeUnixNano: t(48),
               attributes: [
                 { key: 'openinference.span.kind', value: { stringValue: 'GUARDRAIL' } },
-                { key: 'guardrail.item', value: { stringValue: 'no_internal_system_disclosure' } },
+                { key: 'guardrail.item', value: { stringValue: 'no_prompt_disclosure' } },
                 { key: 'guardrail.trigger.action', value: { stringValue: 'MONITOR' } },
                 { key: 'llm.model_name', value: { stringValue: 'gemini-2.0-flash' } },
                 { key: 'llm.system', value: { stringValue: 'google' } },
                 { key: 'llm.input_messages.0.message.role', value: { stringValue: 'system' } },
-                { key: 'llm.input_messages.0.message.content', value: { stringValue: 'You are a security analyst. Check whether the input violates the guardrail no_internal_system_disclosure.' } },
+                { key: 'llm.input_messages.0.message.content', value: { stringValue: 'You are a security analyst. Check whether the input violates the guardrail no_prompt_disclosure.' } },
                 { key: 'llm.input_messages.1.message.role', value: { stringValue: 'user' } },
                 { key: 'llm.input_messages.1.message.content', value: { stringValue: 'What are the amenities at hotel 12345?' } },
                 { key: 'llm.output_messages.0.message.role', value: { stringValue: 'assistant' } },
@@ -218,6 +218,181 @@ export const TRACE_RESPONSE = {
       ],
     },
   ],
+};
+
+const STRUCTURED_TRACE_ID = 'structured00112233445566778899aa';
+
+export const STRUCTURED_SEARCH_RESPONSE = {
+  traces: [
+    {
+      traceID: STRUCTURED_TRACE_ID,
+      rootServiceName: 'chat-agent',
+      rootTraceName: 'ChatCompletion',
+      startTimeUnixNano: '1767225600000000000',
+      durationMs: 3223,
+      spanSets: [],
+    },
+  ],
+};
+
+export const STRUCTURED_TRACE_RESPONSE = {
+  resourceSpans: [
+    {
+      resource: {
+        attributes: [
+          { key: 'service.name', value: { stringValue: 'chat-agent' } },
+        ],
+      },
+      scopeSpans: [
+        {
+          spans: [
+            {
+              traceId: STRUCTURED_TRACE_ID,
+              spanId: 'structspan000001',
+              parentSpanId: '',
+              name: 'ChatCompletion',
+              startTimeUnixNano: '1767225600000000000',
+              endTimeUnixNano: '1767225603222315301',
+              attributes: [
+                { key: 'openinference.span.kind', value: { stringValue: 'LLM' } },
+                { key: 'llm.model_name', value: { stringValue: 'claude-sonnet-4-5' } },
+                { key: 'llm.input_messages.1.message.role', value: { stringValue: 'user' } },
+                { key: 'llm.input_messages.1.message.contents.0.message_content.type', value: { stringValue: 'text' } },
+                { key: 'llm.input_messages.1.message.contents.0.message_content.text', value: { stringValue: '## User\n- **Name:** example_user\n\nPlease answer the question below.' } },
+                { key: 'llm.input_messages.2.message.role', value: { stringValue: 'user' } },
+                { key: 'llm.input_messages.2.message.contents.0.message_content.type', value: { stringValue: 'text' } },
+                { key: 'llm.input_messages.2.message.contents.0.message_content.text', value: { stringValue: 'Please look into ticket PROJ-123 and answer the question.' } },
+                { key: 'llm.output_messages.0.message.role', value: { stringValue: 'assistant' } },
+                { key: 'llm.output_messages.0.message.tool_calls.0.tool_call.id', value: { stringValue: 'tooluse_example0001' } },
+                { key: 'llm.output_messages.0.message.tool_calls.0.tool_call.function.name', value: { stringValue: 'transfer_to_agent' } },
+                { key: 'llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments', value: { stringValue: '{}' } },
+                { key: 'llm.token_count.prompt', value: { intValue: '6871' } },
+                { key: 'llm.token_count.completion', value: { intValue: '67' } },
+                { key: 'llm.token_count.total', value: { intValue: '6938' } },
+              ],
+              events: [],
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+const TOOL_VISUALIZATION_TRACE_ID = 'toolvisualization0011223344556677';
+const jiraDefinition = {
+  type: 'function',
+  function: {
+    name: 'get_jira_issue',
+    description: 'Get one Jira issue with selected fields.',
+    parameters: {
+      type: 'object',
+      properties: {
+        issue_key: { type: 'string', description: 'Jira issue key.' },
+        fields: { type: 'array', items: { type: 'string' }, default: ['summary'], description: 'Fields to return.' },
+      },
+      required: ['issue_key'],
+    },
+    strict: false,
+  },
+};
+const memoryDefinition = {
+  type: 'function',
+  function: {
+    name: 'save_memory',
+    description: 'Save a memory for future sessions.',
+    parameters: {
+      type: 'object',
+      properties: {
+        content: { type: 'string', description: 'Memory content.' },
+        memory_type: { type: 'string', default: 'knowledge', description: 'Retention policy for the saved memory.' },
+        metadata: { anyOf: [{ type: 'object' }, { type: 'null' }], default: null, description: 'Optional context.' },
+      },
+      required: ['content'],
+    },
+  },
+};
+const largeJiraResult = JSON.stringify({
+  key: 'PROJ-123',
+  fields: {
+    summary: 'Example issue summary',
+    status: { name: 'In Progress' },
+    reporter: { displayName: 'Example User' },
+    description: {
+      type: 'doc',
+      content: Array.from({ length: 16 }, (_, index) => ({
+        type: 'paragraph',
+        content: [{ type: 'text', text: `Detailed Jira result line ${index + 1}` }],
+      })),
+    },
+  },
+});
+
+export const TOOL_VISUALIZATION_SEARCH_RESPONSE = {
+  traces: [{
+    traceID: TOOL_VISUALIZATION_TRACE_ID,
+    rootServiceName: 'tool-service',
+    rootTraceName: 'ChatCompletion',
+    startTimeUnixNano: '1767225600000000000',
+    durationMs: 2200,
+    spanSets: [],
+  }],
+};
+
+export const TOOL_VISUALIZATION_TRACE_RESPONSE = {
+  resourceSpans: [{
+    resource: { attributes: [{ key: 'service.name', value: { stringValue: 'tool-service' } }] },
+    scopeSpans: [{
+      spans: [{
+        traceId: TOOL_VISUALIZATION_TRACE_ID,
+        spanId: 'toolspan00000001',
+        parentSpanId: '',
+        name: 'ChatCompletion',
+        startTimeUnixNano: '1767225600000000000',
+        endTimeUnixNano: '1767225602200000000',
+        attributes: [
+          { key: 'openinference.span.kind', value: { stringValue: 'LLM' } },
+          { key: 'llm.model_name', value: { stringValue: 'claude-sonnet-4-5' } },
+          { key: 'llm.tools.0.tool.json_schema', value: { stringValue: JSON.stringify(jiraDefinition) } },
+          { key: 'llm.tools.1.tool.json_schema', value: { stringValue: JSON.stringify(memoryDefinition) } },
+          { key: 'llm.tools.2.tool.json_schema', value: { stringValue: '{broken' } },
+          { key: 'llm.input_messages.0.message.role', value: { stringValue: 'user' } },
+          { key: 'llm.input_messages.0.message.content', value: { stringValue: 'Inspect PROJ-123.' } },
+          { key: 'llm.input_messages.1.message.role', value: { stringValue: 'assistant' } },
+          { key: 'llm.input_messages.1.message.tool_calls.0.tool_call.id', value: { stringValue: 'call_jira_1' } },
+          { key: 'llm.input_messages.1.message.tool_calls.0.tool_call.function.name', value: { stringValue: 'get_jira_issue' } },
+          { key: 'llm.input_messages.1.message.tool_calls.0.tool_call.function.arguments', value: { stringValue: '{"issue_key":"PROJ-123","fields":["summary","status","description"]}' } },
+          { key: 'llm.input_messages.2.message.role', value: { stringValue: 'tool' } },
+          { key: 'llm.input_messages.2.message.tool_call_id', value: { stringValue: 'call_jira_1' } },
+          { key: 'llm.input_messages.2.message.contents.0.message_content.type', value: { stringValue: 'text' } },
+          { key: 'llm.input_messages.2.message.contents.0.message_content.text', value: { stringValue: largeJiraResult } },
+          { key: 'llm.input_messages.3.message.role', value: { stringValue: 'assistant' } },
+          { key: 'llm.input_messages.3.message.tool_calls.0.tool_call.id', value: { stringValue: 'call_bad_args' } },
+          { key: 'llm.input_messages.3.message.tool_calls.0.tool_call.function.name', value: { stringValue: 'custom_tool' } },
+          { key: 'llm.input_messages.3.message.tool_calls.0.tool_call.function.arguments', value: { stringValue: '{broken-arguments' } },
+          { key: 'llm.input_messages.4.message.role', value: { stringValue: 'tool' } },
+          { key: 'llm.input_messages.4.message.tool_call_id', value: { stringValue: 'orphan_result' } },
+          { key: 'llm.input_messages.4.message.content', value: { stringValue: 'not-json-result' } },
+          { key: 'llm.output_messages.0.message.role', value: { stringValue: 'assistant' } },
+          { key: 'llm.output_messages.0.message.contents.0.message_content.type', value: { stringValue: 'reasoning' } },
+          { key: 'llm.output_messages.0.message.contents.0.message_content.text', value: { stringValue: 'I need one more status check.' } },
+          { key: 'llm.output_messages.0.message.contents.1.message_content.type', value: { stringValue: 'tool_use' } },
+          { key: 'llm.output_messages.0.message.contents.1.tool_call.id', value: { stringValue: 'call_status_1' } },
+          { key: 'llm.output_messages.0.message.contents.1.tool_call.function.name', value: { stringValue: 'get_jira_issue' } },
+          { key: 'llm.output_messages.0.message.contents.1.tool_call.function.arguments', value: { stringValue: '{"issue_key":"PROJ-123","fields":["status"]}' } },
+          { key: 'llm.output_messages.0.message.contents.2.message_content.type', value: { stringValue: 'text' } },
+          { key: 'llm.output_messages.0.message.contents.2.message_content.text', value: { stringValue: 'Checking the Jira status now.' } },
+          { key: 'llm.output_messages.0.message.tool_calls.0.tool_call.id', value: { stringValue: 'call_status_1' } },
+          { key: 'llm.output_messages.0.message.tool_calls.0.tool_call.function.name', value: { stringValue: 'wrong_duplicate_name' } },
+          { key: 'llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments', value: { stringValue: '{}' } },
+          { key: 'llm.output_messages.1.message.role', value: { stringValue: 'tool' } },
+          { key: 'llm.output_messages.1.message.tool_call_id', value: { stringValue: 'call_status_1' } },
+          { key: 'llm.output_messages.1.message.content', value: { stringValue: '{"status":"In Progress"}' } },
+        ],
+        events: [],
+      }],
+    }],
+  }],
 };
 
 // ---------------------------------------------------------------------------
@@ -475,4 +650,42 @@ export const STATUS_TEST_TRACE_RESPONSE = {
       }],
     },
   ],
+};
+
+// ---------------------------------------------------------------------------
+// Deeply nested trace with a long span name at the deepest level
+// ---------------------------------------------------------------------------
+
+const DEEP_TRACE_ID = 'deepnesting00112233445566778899';
+
+export const DEEP_NESTED_SEARCH_RESPONSE = {
+  traces: [{
+    traceID: DEEP_TRACE_ID,
+    rootServiceName: 'agent-service',
+    rootTraceName: 'agent run',
+    startTimeUnixNano: '1787620694830469092',
+    durationMs: 2200,
+    spanSets: [],
+  }],
+};
+
+export const DEEP_NESTED_TRACE_RESPONSE = {
+  resourceSpans: [{
+    resource: { attributes: [{ key: 'service.name', value: { stringValue: 'agent-service' } }] },
+    scopeSpans: [{
+      spans: Array.from({ length: 22 }, (_, depth) => ({
+        traceId: DEEP_TRACE_ID,
+        spanId: `deepspan${String(depth).padStart(8, '0')}`,
+        parentSpanId: depth === 0 ? '' : `deepspan${String(depth - 1).padStart(8, '0')}`,
+        name: depth === 21 ? 'Pydantic AI Claude loop with a very long operation name that cannot fit' : `agent step ${depth}`,
+        startTimeUnixNano: String(BigInt('1787620694830469092') + BigInt(depth) * 1000000n),
+        endTimeUnixNano: String(BigInt('1787620697030469092') - BigInt(depth) * 1000000n),
+        attributes: [
+          { key: 'openinference.span.kind', value: { stringValue: depth === 21 ? 'LLM' : 'AGENT' } },
+          { key: 'llm.model_name', value: { stringValue: 'bedrock-claude-sonnet-5' } },
+        ],
+        events: [],
+      })),
+    }],
+  }],
 };

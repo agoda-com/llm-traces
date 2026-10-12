@@ -20,7 +20,7 @@
     "build:standalone": "webpack --config webpack.config.standalone.js --env production",
     "build:host": "npx --yes tsx scripts/build-host.mjs",
     "dev:host": "npx --yes tsx scripts/build-host.mjs --watch",
-    "test": "node --experimental-strip-types --no-warnings=ExperimentalWarning tests/llmUtils.unit.test.ts && node --import ./tests/node-loader.mjs --experimental-strip-types --no-warnings=ExperimentalWarning tests/tempoClient.unit.test.ts && node --experimental-strip-types --no-warnings=ExperimentalWarning tests/costUtils.unit.test.ts && node --experimental-strip-types --no-warnings=ExperimentalWarning tests/prism-traceql.unit.test.ts",
+    "test": "node --experimental-strip-types --no-warnings=ExperimentalWarning tests/llmUtils.unit.test.ts && node --import ./tests/node-loader.mjs --experimental-strip-types --no-warnings=ExperimentalWarning tests/tempoClient.unit.test.ts && node --experimental-strip-types --no-warnings=ExperimentalWarning tests/costUtils.unit.test.ts && node --experimental-strip-types --no-warnings=ExperimentalWarning tests/formatUtils.unit.test.ts && node --experimental-strip-types --no-warnings=ExperimentalWarning tests/prism-traceql.unit.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/ tests/ --max-warnings 0",
     "e2e": "playwright test",
@@ -51,7 +51,6 @@
   },
   "dependencies": {
     "@emotion/css": "11.13.5",
-    "gpt-tokenizer": "^2.9.0",
     "marked": "^16.0.0"
   },
   "engines": {

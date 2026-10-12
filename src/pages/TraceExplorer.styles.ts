@@ -19,6 +19,7 @@ export const getStyles = (theme: GrafanaTheme2) => ({
   }),
   toolbarTopRow: css({
     display: 'flex',
+    flexWrap: 'wrap',
     gap: theme.spacing(1),
     alignItems: 'center',
   }),
@@ -66,7 +67,7 @@ export const getStyles = (theme: GrafanaTheme2) => ({
   traceList: css({
     overflow: 'auto',
     overscrollBehavior: 'contain',
-    flexShrink: 0,
+    minWidth: '160px',
     background: theme.colors.background.primary,
   }),
   resizeHandle: css({
@@ -129,12 +130,14 @@ export const getStyles = (theme: GrafanaTheme2) => ({
     fontSize: '11px',
     color: theme.colors.text.secondary,
     fontFamily: theme.typography.fontFamilyMonospace,
+    '& > span': {
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+    },
   }),
   traceService: css({
     color: theme.colors.text.link,
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
   }),
   copyBtn: css({
     visibility: 'hidden',

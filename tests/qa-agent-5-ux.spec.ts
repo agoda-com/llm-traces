@@ -1,7 +1,7 @@
 /**
  * QA Agent 5 — UX Interactions, Responsive Layout, Error States, Accessibility, Edge Cases
  *
- * Hits the live Grafana + Tempo stack at http://localhost:3001 with NO mocks.
+ * Hits Grafana at http://localhost:3001 with deterministic Tempo responses.
  * Tests resize, collapse/expand, summary bar, error filter, viewports, console errors,
  * loading states, share button, keyboard navigation (j/k), URL param deep-linking,
  * and back navigation.
@@ -13,10 +13,27 @@
 import { test, expect, Page } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { SEARCH_RESPONSE, TRACE_RESPONSE } from './fixtures/llm-trace';
 
 const PLUGIN_URL = '/a/llm-traces-app';
 const SCREENSHOT_DIR = '/tmp/qa-ux-screenshots';
 const LOAD_TIMEOUT = 25_000;
+const QA_SEARCH_RESPONSE = {
+  ...SEARCH_RESPONSE,
+  traces: SEARCH_RESPONSE.traces.map((trace, index) => index === 0 ? {
+    ...trace,
+    spanSets: [{
+      matched: 1,
+      spans: [{
+        spanID: 'error-search-span',
+        startTimeUnixNano: trace.startTimeUnixNano,
+        durationNanos: '1000000',
+        name: 'failed_operation',
+        attributes: [{ key: 'status', value: { stringValue: 'ERROR' } }],
+      }],
+    }],
+  } : trace),
+};
 
 if (!fs.existsSync(SCREENSHOT_DIR)) {
   fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
@@ -28,19 +45,27 @@ async function shot(page: Page, name: string) {
   console.log(`[screenshot] ${file}`);
 }
 
+async function mockTempo(page: Page): Promise<{ traceUrls: URL[] }> {
+  const traceUrls: URL[] = [];
+  await page.route('**/api/datasources/proxy/uid/**/api/search**', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(QA_SEARCH_RESPONSE) });
+  });
+  await page.route('**/api/datasources/proxy/uid/**/api/traces/**', async (route, request) => {
+    traceUrls.push(new URL(request.url()));
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(TRACE_RESPONSE) });
+  });
+  return { traceUrls };
+}
+
 /** Navigate to plugin and wait for the explorer + at least some traces or error state */
 async function gotoAndWaitForLoad(page: Page) {
+  await mockTempo(page);
   await page.goto(PLUGIN_URL);
   await page.waitForSelector('[data-testid="trace-explorer"]', { timeout: LOAD_TIMEOUT });
-  // Wait for traces, error, or empty state — whichever comes first
-  try {
-    await page.waitForSelector(
-      '[data-testid^="trace-item-"], [data-testid="search-error-message"], [class*="empty"]',
-      { timeout: LOAD_TIMEOUT }
-    );
-  } catch {
-    console.warn('[warn] Timed out waiting for trace items or error state');
-  }
+  await page.waitForSelector(
+    '[data-testid^="trace-item-"], [data-testid="search-error-message"], [class*="empty"]',
+    { timeout: LOAD_TIMEOUT }
+  );
 }
 
 /** Wait for traces to be present and return the first trace ID */
@@ -119,6 +144,10 @@ test.describe('QA Agent 5 — UX Interactions & Layout', () => {
   test('03 · expand trace list after collapse', async ({ page }) => {
     await gotoAndWaitForLoad(page);
 
+    const traceList = page.locator('[data-testid="trace-list-pane"]');
+    const initialTraceCount = await traceList.locator('[data-testid^="trace-item-"]').count();
+    expect(initialTraceCount).toBeGreaterThan(0);
+
     // First collapse
     const collapseBtn = page.locator('button[aria-label="Collapse trace list"]');
     await expect(collapseBtn).toBeVisible({ timeout: 5_000 });
@@ -132,17 +161,13 @@ test.describe('QA Agent 5 — UX Interactions & Layout', () => {
     await page.waitForTimeout(300);
 
     // Trace list pane should be visible again
-    const traceList = page.locator('[data-testid="trace-list-pane"]');
     await expect(traceList).toBeVisible();
 
-    // Traces should still be loaded (count > 0 or no-traces state — not blank)
+    // Traces should still be loaded after the pane is remounted.
     const traceItems = traceList.locator('[data-testid^="trace-item-"]');
     const count = await traceItems.count();
     console.log(`[info] Trace count after re-expand: ${count}`);
-    // Either traces are shown OR the empty/error state is shown — the pane is not blank
-    const isEmpty = await traceList.locator('[class*="empty"]').count() > 0;
-    const hasError = await traceList.locator('[data-testid="search-error-message"]').count() > 0;
-    expect(count > 0 || isEmpty || hasError).toBe(true);
+    expect(count).toBe(initialTraceCount);
 
     console.log('[PASS] Expand: trace list visible, content intact');
     await shot(page, '03-expanded-trace-list');
@@ -172,21 +197,11 @@ test.describe('QA Agent 5 — UX Interactions & Layout', () => {
     await gotoAndWaitForLoad(page);
 
     const traceItems = page.locator('[data-testid^="trace-item-"]');
-    const count = await traceItems.count();
-    if (count === 0) {
-      console.warn('[SKIP] No traces loaded — cannot test error filter button');
-      return;
-    }
+    await expect(traceItems).toHaveCount(2);
 
-    // Check for the error filter button in the trace list header
-    const errBtn = page.locator('button', { hasText: /⚠.*Errors/ });
-    const btnCount = await errBtn.count();
-    if (btnCount > 0) {
-      await expect(errBtn.first()).toBeVisible();
-      console.log('[PASS] Error filter button present (error traces exist in results)');
-    } else {
-      console.log('[INFO] No error filter button — no error traces in current result set (expected when no errors)');
-    }
+    const errBtn = page.getByRole('button', { name: /Errors/ });
+    await expect(errBtn).toBeVisible();
+    console.log('[PASS] Error filter button present');
     await shot(page, '05-error-filter-button');
   });
 
@@ -194,15 +209,12 @@ test.describe('QA Agent 5 — UX Interactions & Layout', () => {
   test('06 · errors-only filter shows only error traces', async ({ page }) => {
     await gotoAndWaitForLoad(page);
 
-    const errBtn = page.locator('button', { hasText: /⚠.*Errors/ });
-    const btnCount = await errBtn.count();
-    if (btnCount === 0) {
-      console.warn('[SKIP] No error filter button found — no error traces to filter');
-      return;
-    }
+    const errBtn = page.getByRole('button', { name: /Errors/ });
+    await expect(errBtn).toBeVisible();
 
     const allTracesBefore = await page.locator('[data-testid^="trace-item-"]').count();
     console.log(`[info] Traces before filter: ${allTracesBefore}`);
+    expect(allTracesBefore).toBe(2);
 
     await errBtn.first().click();
     await page.waitForTimeout(300);
@@ -211,8 +223,9 @@ test.describe('QA Agent 5 — UX Interactions & Layout', () => {
     const countAfter = await tracesAfter.count();
     console.log(`[info] Traces after errors-only filter: ${countAfter}`);
 
-    // After filter, count should be <= before
-    expect(countAfter).toBeLessThanOrEqual(allTracesBefore);
+    expect(countAfter).toBe(1);
+    await expect(page.getByTestId(`trace-item-${SEARCH_RESPONSE.traces[0].traceID}`)).toBeVisible();
+    await expect(page.getByTestId(`trace-item-${SEARCH_RESPONSE.traces[1].traceID}`)).toHaveCount(0);
     // The header should show filtered count
     const header = page.locator('[data-testid="trace-list-pane"] div').first();
     const headerText = await header.textContent();
@@ -463,70 +476,34 @@ test.describe('QA Agent 5 — UX Interactions & Layout', () => {
   });
 
   // ── 14. llt-traceId URL param deep-link ──────────────────────
-  test('14 · llt-traceId URL param loads trace list AND opens specified trace', async ({ page }) => {
-    // Step 1: Load the page normally to get a real trace ID
-    await page.goto(PLUGIN_URL);
-    await page.waitForSelector('[data-testid="trace-explorer"]', { timeout: LOAD_TIMEOUT });
-
-    let realTraceId: string | null = null;
-    try {
-      await page.waitForSelector('[data-testid^="trace-item-"]', { timeout: LOAD_TIMEOUT });
-      const firstItem = page.locator('[data-testid^="trace-item-"]').first();
-      const testId = await firstItem.getAttribute('data-testid');
-      realTraceId = testId ? testId.replace('trace-item-', '') : null;
-    } catch {
-      console.warn('[SKIP] No traces found — cannot test llt-traceId param');
-      return;
-    }
-
-    if (!realTraceId) {
-      console.warn('[SKIP] Could not extract a trace ID — skipping deep-link test');
-      return;
-    }
+  test('14 · llt-traceId URL param opens the trace and preserves the trace list', async ({ page }) => {
+    const { traceUrls } = await mockTempo(page);
+    const realTraceId = SEARCH_RESPONSE.traces[0].traceID;
     console.log(`[info] Using trace ID for deep-link test: ${realTraceId}`);
 
-    // Step 2: Navigate with ?llt-traceId=<id>
     await page.goto(`${PLUGIN_URL}?llt-traceId=${realTraceId}`);
     await page.waitForSelector('[data-testid="trace-explorer"]', { timeout: LOAD_TIMEOUT });
 
-    // Wait for traces to load
-    try {
-      await page.waitForSelector('[data-testid^="trace-item-"]', { timeout: LOAD_TIMEOUT });
-    } catch {
-      console.warn('[WARN] Trace list did not populate with llt-traceId param');
-    }
+    await expect(page.getByRole('button', { name: 'Expand trace list' })).toBeVisible();
+    await page.getByRole('button', { name: 'Expand trace list' }).click();
+    await page.waitForSelector('[data-testid^="trace-item-"]', { timeout: LOAD_TIMEOUT });
 
     // Assert: trace list IS populated (not empty)
     const traceItems = page.locator('[data-testid^="trace-item-"]');
     const traceCount = await traceItems.count();
     console.log(`[info] Trace count with llt-traceId param: ${traceCount}`);
-    expect(traceCount).toBeGreaterThan(0);
+    expect(traceCount).toBe(2);
     console.log('[PASS] Trace list populated when llt-traceId param present');
 
-    // Assert: the specified trace is opened in detail panel
-    try {
-      await page.waitForSelector('[data-testid="trace-detail-view"]', { timeout: LOAD_TIMEOUT });
-      console.log('[PASS] Trace detail view opened from URL param');
-    } catch {
-      console.warn('[WARN] trace-detail-view did not appear for llt-traceId param');
-    }
-
     const detailView = page.locator('[data-testid="trace-detail-view"]');
-    const detailVisible = await detailView.count() > 0 && await detailView.first().isVisible().catch(() => false);
-    console.log(`[info] trace-detail-view visible: ${detailVisible}`);
-    expect(detailVisible).toBe(true);
+    await expect(detailView).toBeVisible({ timeout: LOAD_TIMEOUT });
+    console.log('[PASS] Trace detail view opened from URL param');
 
-    // The trace item for the given ID should be selected (aria-selected or highlighted)
-    const linkedItem = page.locator(`[data-testid="trace-item-${realTraceId}"]`);
-    const linkedCount = await linkedItem.count();
-    if (linkedCount > 0) {
-      const ariaSelected = await linkedItem.first().getAttribute('aria-selected');
-      console.log(`[info] Linked trace item aria-selected: ${ariaSelected}`);
-      expect(ariaSelected).toBe('true');
-      console.log('[PASS] Linked trace item is selected in the list');
-    } else {
-      console.warn('[WARN] Linked trace item not found in current search window (may be outside time range)');
-    }
+    const linkedItem = page.getByTestId(`trace-item-${realTraceId}`);
+    await expect(linkedItem).toBeVisible();
+    await expect(linkedItem).toHaveAttribute('aria-selected', 'true');
+    expect(traceUrls.some((requestUrl) => requestUrl.pathname.endsWith(`/api/traces/${realTraceId}`))).toBe(true);
+    console.log('[PASS] Linked trace item is selected and the exact trace ID was fetched');
 
     await shot(page, '14-url-param-deep-link');
   });

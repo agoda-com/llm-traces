@@ -1,19 +1,24 @@
-import { ReactNode, useEffect, useRef, useMemo, useState } from 'react';
+import { ReactNode, useMemo, useState } from 'react';
 
 import { useStyles2, Icon } from '@grafana/ui';
 import { getStyles } from './LlmSpanDetail.styles';
-import { KeyValuePair, SpanLog, LlmMessage, LlmSpanData, LlmTokenUsage, LlmInvocationParams, extractLlmSpanData, getSpanKindColor, getSpanKind, isOpenInferenceSpan, decodeUnicodeEscapes } from '../utils/llmUtils';
+import { CopyButton, ToolCallCard, ToolCatalog, ToolResultCard } from './ToolVisualization';
+import { KeyValuePair, LlmMessage, LlmMessagePart, LlmSpanData, LlmTokenUsage, LlmInvocationParams, LlmToolCall, LlmToolDefinition, getSpanKindColor, getSpanKind, isOpenInferenceSpan, decodeUnicodeEscapes } from '../utils/llmUtils';
 import { estimateCost, formatCost } from '../utils/costUtils';
 
-// gpt-tokenizer uses cl100k_base (GPT-4 / GPT-3.5 encoding) for token counting
-let countTokens: ((text: string) => number) | null = null;
-try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const tok = require('gpt-tokenizer');
-  const enc = tok.encodingForModel?.('gpt-4') ?? tok;
-  countTokens = (text: string) => enc.encode(text).length;
-} catch {
-  countTokens = null;
+function estimateTokenCount(text: string): number {
+  let asciiCharacters = 0;
+  let nonAsciiCharacters = 0;
+
+  for (const character of text) {
+    if (character.codePointAt(0)! <= 0x7f) {
+      asciiCharacters++;
+    } else {
+      nonAsciiCharacters++;
+    }
+  }
+
+  return Math.max(1, Math.ceil(asciiCharacters / 4 + nonAsciiCharacters));
 }
 
 // marked is available as a transitive dep in the Grafana monorepo
@@ -101,6 +106,11 @@ function formatJson(value: string): string {
   try { return JSON.stringify(JSON.parse(value), null, 2); } catch { return value; }
 }
 
+function formatStructuredValue(value: unknown): string {
+  if (typeof value === 'string') { return formatJson(value); }
+  try { return JSON.stringify(value, null, 2) ?? String(value); } catch { return String(value); }
+}
+
 function FinishReasonBadge({ reason }: { reason: string }) {
   const styles = useStyles2(getStyles);
   const r = reason.toUpperCase();
@@ -118,46 +128,85 @@ function FinishReasonBadge({ reason }: { reason: string }) {
   );
 }
 
-function CopyButton({ text, label }: { text: string; label: string }) {
-  const [copied, setCopied] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => { if (timerRef.current) { clearTimeout(timerRef.current); } }, []);
-  const handleCopy = () => {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      timerRef.current = setTimeout(() => setCopied(false), 1500);
-    });
-  };
+function MessagePartBlock({
+  part,
+  showMarkdown,
+  tools,
+  toolCallsById,
+}: {
+  part: LlmMessagePart;
+  showMarkdown: boolean;
+  tools: LlmToolDefinition[];
+  toolCallsById: ReadonlyMap<string, LlmToolCall>;
+}) {
+  const styles = useStyles2(getStyles);
+  if (part.type === 'text') {
+    return showMarkdown && markedParse ? (
+      <div
+        data-testid="message-part-text"
+        dangerouslySetInnerHTML={{ __html: sanitizeHtml(decodeHtmlEntities(markedParse(part.text))) }}
+      />
+    ) : <div data-testid="message-part-text">{part.text}</div>;
+  }
+  if (part.type === 'reasoning') {
+    return (
+      <div className={styles.reasoningBlock} data-testid="message-part-reasoning">
+        <div className={styles.partLabel}>Reasoning</div>
+        <div>{part.text}</div>
+      </div>
+    );
+  }
+  if (part.type === 'tool_call') {
+    return <ToolCallCard toolCall={part.toolCall} definition={tools.find((tool) => tool.name === part.toolCall.name)} />;
+  }
+  if (part.type === 'tool_result') {
+    const correlatedCall = part.toolCallId ? toolCallsById.get(part.toolCallId) : undefined;
+    return <ToolResultCard result={part.result} toolCallId={part.toolCallId} name={part.name ?? correlatedCall?.name} />;
+  }
+  const label = part.type === 'image' ? 'Image' : part.type === 'audio' ? 'Audio' : 'Unknown part';
   return (
-    <button
-      onClick={handleCopy}
-      title={`Copy ${label}`}
-      style={{
-        background: 'none',
-        border: 'none',
-        cursor: 'pointer',
-        padding: '0 4px',
-        color: 'inherit',
-        opacity: 0.6,
-        fontSize: '11px',
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: '3px',
-      }}
-    >
-      <Icon name={copied ? 'check' : 'copy'} size="sm" />
-      {copied ? 'Copied!' : ''}
-    </button>
+    <div className={styles.structuredPartBlock} data-testid={`message-part-${part.type}`}>
+      <div className={styles.partLabel}>{label}</div>
+      <pre className={styles.structuredValue}>{formatStructuredValue(part.value)}</pre>
+    </div>
   );
 }
 
-function MessageBlock({ message, defaultOpen = true }: { message: LlmMessage; defaultOpen?: boolean }) {
+function sameToolCall(left: LlmToolCall, right: LlmToolCall): boolean {
+  return Boolean(left.id && right.id && left.id === right.id)
+    || (left.name === right.name && left.arguments === right.arguments);
+}
+
+function MessageBlock({
+  message,
+  tools,
+  toolCallsById,
+  defaultOpen = true,
+}: {
+  message: LlmMessage;
+  tools: LlmToolDefinition[];
+  toolCallsById: ReadonlyMap<string, LlmToolCall>;
+  defaultOpen?: boolean;
+}) {
   const styles = useStyles2(getStyles);
   const [isOpen, setIsOpen] = useState(defaultOpen);
   const [showMarkdown, setShowMarkdown] = useState(false);
   const roleStyle = getRoleStyle(message.role, styles);
   const icon = getRoleIcon(message.role);
   const canMarkdown = markedParse !== null && !!message.content;
+  const tokenCount = useMemo(
+    () => message.content ? estimateTokenCount(message.content) : null,
+    [message.content]
+  );
+  const parts = message.parts ?? [];
+  const partToolCalls = parts
+    .filter((part): part is Extract<LlmMessagePart, { type: 'tool_call' }> => part.type === 'tool_call')
+    .map((part) => part.toolCall);
+  const additionalToolCalls = message.toolCalls?.filter(
+    (toolCall) => !partToolCalls.some((partToolCall) => sameToolCall(toolCall, partToolCall))
+  ) ?? [];
+  const hasSemanticContent = Boolean(message.content) || parts.length > 0 || additionalToolCalls.length > 0;
+  const contentClass = showMarkdown && canMarkdown ? styles.markdownContent : styles.messageContent;
 
   return (
     <div className={styles.message} data-testid={`message-block-${message.role}`}>
@@ -186,37 +235,59 @@ function MessageBlock({ message, defaultOpen = true }: { message: LlmMessage; de
         )}
       </button>
       {isOpen && (
-        <>
-          {showMarkdown && canMarkdown ? (
+        <div className={`${contentClass} ${roleStyle}`}>
+          {!hasSemanticContent && <span className={styles.emptyContent}>(empty)</span>}
+          {parts.length > 0 ? (
+            <div className={styles.partStack}>
+              {parts.map((part, index) => (
+                <MessagePartBlock
+                  key={index}
+                  part={part}
+                  showMarkdown={showMarkdown && canMarkdown}
+                  tools={tools}
+                  toolCallsById={toolCallsById}
+                />
+              ))}
+            </div>
+          ) : showMarkdown && canMarkdown ? (
             <div
-              className={`${styles.markdownContent} ${roleStyle}`}
               dangerouslySetInnerHTML={{ __html: sanitizeHtml(decodeHtmlEntities(markedParse!(message.content))) }}
             />
           ) : (
-            <div className={`${styles.messageContent} ${roleStyle}`}>
-              {message.content != null && message.content !== '' ? message.content : <span className={styles.emptyContent}>(empty)</span>}
-              {message.content && (
-                <div style={{ fontSize: '10px', color: 'inherit', opacity: 0.45, marginTop: '4px', textAlign: 'right' }}>
-                  {message.content.split(/\s+/).filter(Boolean).length} words · {message.content.length} chars
-                  {countTokens && ` · ~${countTokens(message.content).toLocaleString()} tokens`}
-                </div>
-              )}
-              {message.toolCalls && message.toolCalls.length > 0 && (
-                <>
-                  {message.toolCalls.map((tc, i) => (
-                    <div key={i} className={styles.toolCallBlock}>
-                      <div className={styles.toolCallName}>⚙ {tc.name}{tc.id ? ` · ${tc.id}` : ''}</div>
-                      <div className={styles.toolCallArgs}>{formatJson(tc.arguments)}</div>
-                    </div>
-                  ))}
-                </>
-              )}
+            message.content
+          )}
+          {!showMarkdown && message.content && (
+            <div style={{ fontSize: '10px', color: 'inherit', opacity: 0.45, marginTop: '4px', textAlign: 'right' }}>
+              {message.content.split(/\s+/).filter(Boolean).length} words · {message.content.length} chars
+              {tokenCount !== null && ` · ~${tokenCount.toLocaleString()} tokens`}
             </div>
           )}
-        </>
+          {additionalToolCalls.map((toolCall, index) => (
+            <ToolCallCard
+              key={toolCall.id ?? `${toolCall.name}-${index}`}
+              toolCall={toolCall}
+              definition={tools.find((tool) => tool.name === toolCall.name)}
+            />
+          ))}
+        </div>
       )}
     </div>
   );
+}
+
+function indexToolCalls(messages: LlmMessage[]): ReadonlyMap<string, LlmToolCall> {
+  const calls = new Map<string, LlmToolCall>();
+  for (const message of messages) {
+    const partCalls = (message.parts ?? [])
+      .filter((part): part is Extract<LlmMessagePart, { type: 'tool_call' }> => part.type === 'tool_call')
+      .map((part) => part.toolCall);
+    for (const call of [...partCalls, ...(message.toolCalls ?? [])]) {
+      if (call.id && !calls.has(call.id)) {
+        calls.set(call.id, call);
+      }
+    }
+  }
+  return calls;
 }
 
 function TokenUsageDisplay({ usage, model, precomputedCostUsd }: { usage: LlmTokenUsage; model: string; precomputedCostUsd?: number }) {
@@ -455,13 +526,15 @@ function OpenInferenceSpanDetail({ tags, spanKind }: { tags: KeyValuePair[]; spa
 
 interface LlmSpanDetailProps {
   tags: KeyValuePair[];
-  logs: SpanLog[];
-  operationName: string;
+  llmData: LlmSpanData;
 }
 
-export function LlmSpanDetail({ tags, logs, operationName }: LlmSpanDetailProps) {
+export function LlmSpanDetail({ tags, llmData }: LlmSpanDetailProps) {
   const styles = useStyles2(getStyles);
-  const llmData: LlmSpanData = useMemo(() => extractLlmSpanData(tags, logs, operationName), [tags, logs, operationName]);
+  const toolCallsById = useMemo(
+    () => indexToolCalls([...llmData.inputMessages, ...llmData.outputMessages]),
+    [llmData.inputMessages, llmData.outputMessages]
+  );
 
   if (!llmData.isLlm) {
     // For non-LLM OpenInference spans (CHAIN, TOOL, RETRIEVER, AGENT, RERANKER, UNKNOWN),
@@ -514,7 +587,12 @@ export function LlmSpanDetail({ tags, logs, operationName }: LlmSpanDetailProps)
         >
           <div className={styles.messagesContainer}>
             {llmData.inputMessages.map((msg, i) => (
-              <MessageBlock key={`${i}-${msg.role}-${(msg.content ?? '').slice(0, 20)}`} message={msg} />
+              <MessageBlock
+                key={`${i}-${msg.role}-${(msg.content ?? '').slice(0, 20)}`}
+                message={msg}
+                tools={llmData.tools}
+                toolCallsById={toolCallsById}
+              />
             ))}
           </div>
         </CollapsibleSection>
@@ -535,9 +613,20 @@ export function LlmSpanDetail({ tags, logs, operationName }: LlmSpanDetailProps)
         >
           <div className={styles.messagesContainer}>
             {llmData.outputMessages.map((msg, i) => (
-              <MessageBlock key={`${i}-${msg.role}-${(msg.content ?? '').slice(0, 20)}`} message={msg} />
+              <MessageBlock
+                key={`${i}-${msg.role}-${(msg.content ?? '').slice(0, 20)}`}
+                message={msg}
+                tools={llmData.tools}
+                toolCallsById={toolCallsById}
+              />
             ))}
           </div>
+        </CollapsibleSection>
+      )}
+
+      {llmData.tools.length > 0 && (
+        <CollapsibleSection title={`Available Tools (${llmData.tools.length})`} defaultOpen={false} testId="available-tools-section">
+          <ToolCatalog tools={llmData.tools} />
         </CollapsibleSection>
       )}
 
