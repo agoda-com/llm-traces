@@ -790,32 +790,31 @@ function getAdkContentNotices(tags: KeyValuePair[]): string[] {
   return notices;
 }
 
-// ADK `execute_tool` spans record the call and its result as separate attributes instead of messages.
+// Tool arguments and results arrive as JSON text or, from OTLP exporters that send structured values,
+// as arrays and objects. Valid JSON is parsed before its strings are decoded; anything else is decoded
+// as plain text.
+function toolPayloadText(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  if (typeof raw !== 'string') {
+    return JSON.stringify(decodeStrings(raw));
+  }
+  try {
+    return JSON.stringify(decodeStrings(JSON.parse(raw)));
+  } catch {
+    return decodeUnicodeEscapes(raw);
+  }
+}
+
+// A tool span records the call and its result as separate attributes instead of messages.
 // They are shown as one assistant tool call followed by one tool result.
-function extractAdkToolMessages(tags: KeyValuePair[]): { input: LlmMessage[]; output: LlmMessage[] } | undefined {
-  // Valid JSON is parsed before its strings are decoded; anything else is decoded as plain text.
-  const jsonOrDecoded = (raw: string | undefined): string | undefined => {
-    if (raw === undefined) {
-      return undefined;
-    }
-    try {
-      return JSON.stringify(decodeStrings(JSON.parse(raw)));
-    } catch {
-      return decodeUnicodeEscapes(raw);
-    }
-  };
-  const args = jsonOrDecoded(getRawStringAttr(tags, 'gcp.vertex.agent.tool_call_args'));
-  const response = jsonOrDecoded(getRawStringAttr(tags, 'gcp.vertex.agent.tool_response'));
-  if (args === undefined && response === undefined) {
-    return undefined;
-  }
-  if (getAdkContentNotices(tags).includes(ADK_NOT_CAPTURED_NOTICE)) {
-    return undefined;
-  }
-  const name = getAttr(tags, 'gen_ai.tool.name') ?? 'unknown';
-  const callId = getAttr(tags, 'gen_ai.tool.call.id');
-  // ADK writes this placeholder when the response event carries no function response id.
-  const id = callId && callId !== '<not specified>' ? callId : undefined;
+function buildToolCallMessages(
+  name: string,
+  id: string | undefined,
+  args: string | undefined,
+  response: string | undefined
+): { input: LlmMessage[]; output: LlmMessage[] } {
   const toolCall: LlmToolCall = { name, arguments: args ?? '', ...(id ? { id } : {}) };
   return {
     input: args === undefined ? [] : [{ role: 'assistant', content: '', parts: [{ type: 'tool_call', toolCall }], toolCalls: [toolCall] }],
@@ -827,6 +826,40 @@ function extractAdkToolMessages(tags: KeyValuePair[]): { input: LlmMessage[]; ou
       name,
     }],
   };
+}
+
+function extractAdkToolMessages(tags: KeyValuePair[]): { input: LlmMessage[]; output: LlmMessage[] } | undefined {
+  const args = toolPayloadText(getRawStringAttr(tags, 'gcp.vertex.agent.tool_call_args'));
+  const response = toolPayloadText(getRawStringAttr(tags, 'gcp.vertex.agent.tool_response'));
+  if (args === undefined && response === undefined) {
+    return undefined;
+  }
+  if (getAdkContentNotices(tags).includes(ADK_NOT_CAPTURED_NOTICE)) {
+    return undefined;
+  }
+  const name = getAttr(tags, 'gen_ai.tool.name') ?? 'unknown';
+  const callId = getAttr(tags, 'gen_ai.tool.call.id');
+  // ADK writes this placeholder when the response event carries no function response id.
+  const id = callId && callId !== '<not specified>' ? callId : undefined;
+  return buildToolCallMessages(name, id, args, response);
+}
+
+// OTel GenAI `execute_tool` spans: gen_ai.tool.call.arguments / gen_ai.tool.call.result, described by
+// gen_ai.tool.name, gen_ai.tool.call.id, gen_ai.tool.description and gen_ai.tool.type.
+function extractGenAiToolSpan(tags: KeyValuePair[]): { input: LlmMessage[]; output: LlmMessage[]; tools: LlmToolDefinition[] } | undefined {
+  const args = toolPayloadText(getRawAttr(tags, 'gen_ai.tool.call.arguments'));
+  const response = toolPayloadText(getRawAttr(tags, 'gen_ai.tool.call.result'));
+  if (args === undefined && response === undefined) {
+    return undefined;
+  }
+  const name = getAttr(tags, 'gen_ai.tool.name') ?? 'unknown';
+  const description = getAttr(tags, 'gen_ai.tool.description');
+  const type = getAttr(tags, 'gen_ai.tool.type');
+  // The tool description is shown on the tool call card, which looks tools up by name.
+  const tools: LlmToolDefinition[] = description || type
+    ? [{ index: 0, type: type ?? 'function', name, ...(description ? { description } : {}), raw: { name, description, type }, isValid: name !== 'unknown' }]
+    : [];
+  return { ...buildToolCallMessages(name, getAttr(tags, 'gen_ai.tool.call.id'), args, response), tools };
 }
 
 function detectConvention(tags: KeyValuePair[]): LlmConvention | null {
@@ -1017,6 +1050,11 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
     // Traceloop flat-indexed format: gen_ai.completion.{i}.role / gen_ai.completion.{i}.content
     outputMessages.push(...extractIndexedMessages(tags, 'gen_ai.completion.'));
   }
+  const toolSpan = inputMessages.length === 0 && outputMessages.length === 0 ? extractGenAiToolSpan(tags) : undefined;
+  if (toolSpan) {
+    inputMessages.push(...toolSpan.input);
+    outputMessages.push(...toolSpan.output);
+  }
   inputMessages = withSystemInstructions(inputMessages, getRawAttr(tags, 'gen_ai.system_instructions'));
   const finishReasonsRaw = getRawStringAttr(tags, 'gen_ai.response.finish_reasons');
   let finishReasonFromArray: string | undefined;
@@ -1032,13 +1070,14 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
     ?? fromEvents.finishReason;
   const precomputedCostUsd = getNumAttr(tags, 'gen_ai.cost.total_cost');
   const attributeTools = extractOtelToolDefinitions(tags);
+  const tools = attributeTools.length > 0 ? attributeTools : fromEvents.tools.length > 0 ? fromEvents.tools : toolSpan?.tools ?? [];
   return {
     convention: 'otel-genai',
     model,
     system: getAttr(tags, 'gen_ai.system'),
     inputMessages,
     outputMessages,
-    tools: attributeTools.length > 0 ? attributeTools : fromEvents.tools,
+    tools,
     tokenUsage: {
       input: getNumAttr(tags, 'gen_ai.usage.input_tokens') ?? getNumAttr(tags, 'gen_ai.usage.prompt_tokens'),
       output: getNumAttr(tags, 'gen_ai.usage.output_tokens') ?? getNumAttr(tags, 'gen_ai.usage.completion_tokens'),
@@ -1159,7 +1198,7 @@ export function extractLlmSpanData(tags: KeyValuePair[], logs: SpanLog[], operat
   // CHAIN, TOOL, RETRIEVER etc. are structural spans, not the model call itself.
   const isLlm = convention === 'openinference'
     ? data.spanKind?.toUpperCase() === 'LLM' || data.spanKind?.toUpperCase() === 'GUARDRAIL'
-    : true;
+    : getSpanKind(tags) !== 'TOOL';
   return { isLlm, ...data };
 }
 
@@ -1241,6 +1280,16 @@ export function getLlmDisplayAttributeKeys(
     }
     if (data.tools.length > 0) {
       addExact('gen_ai.tool.definitions');
+    }
+    if (tags.some((t) => t.key === 'gen_ai.tool.call.arguments' || t.key === 'gen_ai.tool.call.result')) {
+      addExact(
+        'gen_ai.tool.call.arguments',
+        'gen_ai.tool.call.result',
+        'gen_ai.tool.name',
+        'gen_ai.tool.call.id',
+        'gen_ai.tool.description',
+        'gen_ai.tool.type'
+      );
     }
   } else {
     if (data.inputMessages.length > 0) {
@@ -1341,6 +1390,9 @@ export function isLlmSpan(tags: KeyValuePair[]): boolean {
     const kind = String(oiKind.value).toUpperCase();
     return kind === 'LLM' || kind === 'GUARDRAIL';
   }
+  if (getSpanKind(tags) === 'TOOL') {
+    return false;
+  }
   if (tags.some(
     (t) =>
       t.key === 'gen_ai.system' ||
@@ -1405,6 +1457,10 @@ const OTEL_OPERATION_TO_KIND: Record<string, string> = {
   check_guardrail: 'GUARDRAIL',
 };
 
+function hasGenAiToolIdentity(tags: KeyValuePair[]): boolean {
+  return tags.some((t) => (t.key === 'gen_ai.tool.name' || t.key === 'gen_ai.tool.call.id') && t.value !== '' && t.value !== undefined && t.value !== null);
+}
+
 /**
  * Returns the display span kind across all supported conventions:
  *   - OpenInference: openinference.span.kind (AGENT, LLM, CHAIN, TOOL, RETRIEVER, EMBEDDING, RERANKER)
@@ -1423,6 +1479,11 @@ export function getSpanKind(tags: KeyValuePair[]): string | undefined {
   const opName = getAttr(tags, 'gen_ai.operation.name');
   if (opName) {
     return OTEL_OPERATION_TO_KIND[opName.toLowerCase()] ?? opName.toUpperCase();
+  }
+
+  // Frameworks such as Pydantic AI set no operation name on tool spans.
+  if (hasGenAiToolIdentity(tags)) {
+    return 'TOOL';
   }
 
   // Fallback: any span with gen_ai.system, gen_ai.request.model, llm.model_name, or

@@ -1,7 +1,7 @@
 import { test, expect, Page } from '@playwright/test';
 import { SEARCH_RESPONSE, TRACE_RESPONSE, VERTEX_TRACE_RESPONSE, OTEL_GENAI_TRACE_RESPONSE, GENERIC_TRACE_RESPONSE, STRUCTURED_SEARCH_RESPONSE, STRUCTURED_TRACE_RESPONSE } from './fixtures/llm-trace';
 import { waitForToolbarLayout } from './waitForToolbarLayout';
-import { CONVENTION_SEARCH_RESPONSE, GENAI_EVENTS_TRACE } from './fixtures/conventions';
+import { CONVENTION_SEARCH_RESPONSE, GENAI_EVENTS_TRACE, GENAI_TOOL_TRACE } from './fixtures/conventions';
 
 const PLUGIN_URL = '/a/agoda-llmtraces-app';
 async function mockTempoApis(page: Page) {
@@ -1555,5 +1555,28 @@ test.describe('OTel GenAI events and newest semantic conventions', () => {
     await expect(input.getByTestId('message-block-system')).toContainText('Reply with a single word.');
     await expect(input.getByText('Capital of Italy?')).toBeVisible();
     await expect(page.getByTestId('output-section').getByText('Rome')).toBeVisible();
+  });
+});
+
+test.describe('OTel GenAI tool spans', () => {
+  test('execute_tool span shows the tool call and result cards with description and call id', async ({ page }) => {
+    await openConventionTrace(page, GENAI_TOOL_TRACE, 'toolspan00000001');
+    const detail = page.getByTestId('llm-span-detail');
+    await expect(page.getByTestId('llm-span-kind')).toContainText('TOOL');
+    const call = detail.getByTestId('message-part-tool_call');
+    await expect(call).toContainText('get_weather');
+    await expect(call).toContainText('Get the current weather for a city');
+    await expect(call).toContainText('Paris');
+    await expect(call.getByTestId('tool-correlation-chip')).toHaveText('call_weather_1');
+    await expect(detail.getByTestId('message-part-tool_result')).toContainText('sunny');
+  });
+
+  test('a tool span without an operation name is detected by gen_ai.tool.name', async ({ page }) => {
+    await openConventionTrace(page, GENAI_TOOL_TRACE, 'toolspan00000002');
+    const detail = page.getByTestId('llm-span-detail');
+    await expect(page.getByTestId('llm-span-kind')).toContainText('TOOL');
+    await expect(detail.getByTestId('message-part-tool_call')).toContainText('search_docs');
+    await expect(detail.getByTestId('message-part-tool_call')).toContainText('rate limits');
+    await expect(detail.getByTestId('message-part-tool_result')).toContainText('doc-b');
   });
 });

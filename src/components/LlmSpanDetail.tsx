@@ -538,7 +538,9 @@ export function LlmSpanDetail({ tags, llmData }: LlmSpanDetailProps) {
     [llmData.inputMessages, llmData.outputMessages]
   );
 
-  if (!llmData.isLlm) {
+  // Spans of the non-OpenInference conventions are always shown with the LLM view, even when they are
+  // not model calls themselves (tool spans), because their messages carry the tool call and result.
+  if (!llmData.isLlm && (llmData.convention === 'openinference' || llmData.convention === 'unknown')) {
     // For non-LLM OpenInference spans (CHAIN, TOOL, RETRIEVER, AGENT, RERANKER, UNKNOWN),
     // show a structured detail panel with their relevant attributes.
     // EMBEDDING spans are routed through the LLM detail path so model/token/cost data is shown (BUG-022).

@@ -166,3 +166,37 @@ export const GENAI_EVENTS_TRACE = buildTrace(CONVENTION_TRACE_ID, { name: 'examp
     ],
   },
 ]);
+
+// ---------------------------------------------------------------------------
+// Area 2: tool spans per OTel GenAI
+// ---------------------------------------------------------------------------
+
+export const GENAI_TOOL_TRACE = buildTrace(CONVENTION_TRACE_ID, { name: 'example.genai', version: '1.0.0' }, [
+  {
+    spanId: 'toolspan00000001',
+    name: 'execute_tool get_weather',
+    startMs: 100,
+    endMs: 400,
+    attributes: {
+      'gen_ai.operation.name': 'execute_tool',
+      'gen_ai.tool.name': 'get_weather',
+      'gen_ai.tool.call.id': 'call_weather_1',
+      'gen_ai.tool.description': 'Get the current weather for a city',
+      'gen_ai.tool.type': 'function',
+      'gen_ai.tool.call.arguments': '{"city":"Paris","unit":"celsius"}',
+      'gen_ai.tool.call.result': '{"temperature":21,"conditions":"sunny"}',
+    },
+  },
+  {
+    spanId: 'toolspan00000002',
+    name: 'running tool',
+    startMs: 500,
+    endMs: 700,
+    attributes: {
+      'gen_ai.tool.name': 'search_docs',
+      'gen_ai.tool.call.id': 'call_search_2',
+      'gen_ai.tool.call.arguments': '{"query":"rate limits","max_results":3}',
+      'gen_ai.tool.call.result': '["doc-a","doc-b"]',
+    },
+  },
+]);

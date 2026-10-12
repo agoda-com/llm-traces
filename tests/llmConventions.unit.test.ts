@@ -6,6 +6,8 @@
 import {
   extractLlmSpanData,
   getLlmDisplayAttributeKeys,
+  getSpanKind,
+  isLlmSpan,
   type KeyValuePair,
   type SpanLog,
 } from '../src/utils/llmUtils.ts';
@@ -208,6 +210,70 @@ describe('gen_ai.tool.definitions is still read from the span attribute', () => 
   const defs = JSON.stringify([{ type: 'function', name: 'search', description: 'Search', parameters: { type: 'object', properties: {} } }]);
   const result = extractLlmSpanData([kv('gen_ai.operation.name', 'chat'), kv('gen_ai.tool.definitions', defs)], []);
   assertEquals(result.tools[0]?.name, 'search', 'tool definition name');
+});
+
+// ---------------------------------------------------------------------------
+// Area 2: tool spans per OTel GenAI
+// ---------------------------------------------------------------------------
+
+describe('OTel GenAI execute_tool span', () => {
+  const tags = [
+    kv('gen_ai.operation.name', 'execute_tool'),
+    kv('gen_ai.tool.name', 'get_weather'),
+    kv('gen_ai.tool.call.id', 'call_1'),
+    kv('gen_ai.tool.description', 'Get the weather for a city'),
+    kv('gen_ai.tool.type', 'function'),
+    kv('gen_ai.tool.call.arguments', '{"city":"Paris"}'),
+    kv('gen_ai.tool.call.result', '{"temperature":21}'),
+  ];
+  const result = extractLlmSpanData(tags, []);
+  assertEquals(getSpanKind(tags), 'TOOL', 'span kind is TOOL');
+  assertEquals(result.inputMessages.length, 1, 'one input message for the call');
+  assertEquals(result.inputMessages[0].role, 'assistant', 'the call is shown as an assistant tool call');
+  assertEquals(result.inputMessages[0].toolCalls?.[0].name, 'get_weather', 'tool call name from gen_ai.tool.name');
+  assertEquals(result.inputMessages[0].toolCalls?.[0].id, 'call_1', 'tool call id from gen_ai.tool.call.id');
+  assertEquals(result.inputMessages[0].toolCalls?.[0].arguments, '{"city":"Paris"}', 'tool call arguments');
+  assertEquals(result.outputMessages.length, 1, 'one output message for the result');
+  const toolResult = result.outputMessages[0].parts?.[0];
+  assert(toolResult?.type === 'tool_result' && toolResult.result === '{"temperature":21}', 'tool result part carries gen_ai.tool.call.result');
+  assert(toolResult?.type === 'tool_result' && toolResult.toolCallId === 'call_1' && toolResult.name === 'get_weather', 'tool result is correlated by call id and name');
+  assertEquals(result.tools[0]?.name, 'get_weather', 'tool definition synthesised from the tool attributes');
+  assertEquals(result.tools[0]?.description, 'Get the weather for a city', 'tool description from gen_ai.tool.description');
+  assertEquals(result.tools[0]?.type, 'function', 'tool type from gen_ai.tool.type');
+  assert(!isLlmSpan(tags), 'a tool span is not counted as an LLM span');
+  assertEquals(result.isLlm, false, 'a tool span is not a model call');
+  const keys = getLlmDisplayAttributeKeys(tags, result);
+  assert(keys.has('gen_ai.tool.call.arguments') && keys.has('gen_ai.tool.call.result') && keys.has('gen_ai.tool.description'), 'tool attributes are promoted out of the raw list');
+});
+
+describe('Tool spans are detected without an operation name', () => {
+  assertEquals(getSpanKind([kv('gen_ai.tool.name', 'search')]), 'TOOL', 'gen_ai.tool.name alone marks a TOOL span');
+  assertEquals(getSpanKind([kv('gen_ai.tool.call.id', 'call_7')]), 'TOOL', 'gen_ai.tool.call.id alone marks a TOOL span');
+  assertEquals(getSpanKind([kv('gen_ai.operation.name', 'chat'), kv('gen_ai.request.model', 'm')]), 'LLM', 'chat spans stay LLM');
+  assert(!isLlmSpan([kv('gen_ai.tool.name', 'search'), kv('gen_ai.system', 'example')]), 'tool span with gen_ai.system is not an LLM span');
+});
+
+describe('Tool span with structured arguments and result', () => {
+  const tags = [
+    kv('gen_ai.tool.name', 'lookup'),
+    kv('gen_ai.tool.call.arguments', { query: 'x', limit: 2 }),
+    kv('gen_ai.tool.call.result', [{ id: 1 }, { id: 2 }]),
+  ];
+  const result = extractLlmSpanData(tags, []);
+  assertEquals(result.inputMessages[0].toolCalls?.[0].arguments, '{"query":"x","limit":2}', 'object arguments are serialised as JSON');
+  const toolResult = result.outputMessages[0].parts?.[0];
+  assert(toolResult?.type === 'tool_result' && toolResult.result === '[{"id":1},{"id":2}]', 'array result is serialised as JSON');
+});
+
+describe('Tool span with only a result', () => {
+  const result = extractLlmSpanData([kv('gen_ai.tool.name', 'lookup'), kv('gen_ai.tool.call.result', 'done')], []);
+  assertEquals(result.inputMessages.length, 0, 'no call card without arguments');
+  assertEquals(result.outputMessages.length, 1, 'result card');
+});
+
+describe('Chat spans keep counting as model calls', () => {
+  const result = extractLlmSpanData([kv('gen_ai.operation.name', 'chat'), kv('gen_ai.request.model', 'm'), kv('gen_ai.usage.input_tokens', 5)], []);
+  assertEquals(result.isLlm, true, 'chat span isLlm');
 });
 
 // ---------------------------------------------------------------------------
