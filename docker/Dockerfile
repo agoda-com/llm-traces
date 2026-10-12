@@ -6,6 +6,6 @@ COPY . .
 RUN npm run build
 
 FROM grafana/grafana-oss:12.0.0
-COPY --from=build --chown=grafana:root /app/dist /var/lib/grafana/plugins/llm-traces-app
+COPY --from=build --chown=grafana:root /app/dist /var/lib/grafana/plugins/agoda-llmtraces-app
 COPY --chown=grafana:root provisioning/plugins /etc/grafana/provisioning/plugins
 COPY --chown=grafana:root provisioning/datasources/tempo.yaml /etc/grafana/provisioning/datasources/tempo.yaml

@@ -15,7 +15,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { SEARCH_RESPONSE, TRACE_RESPONSE } from './fixtures/llm-trace';
 
-const PLUGIN_URL = '/a/llm-traces-app';
+const PLUGIN_URL = '/a/agoda-llmtraces-app';
 const SCREENSHOT_DIR = '/tmp/qa-ux-screenshots';
 const LOAD_TIMEOUT = 25_000;
 const QA_SEARCH_RESPONSE = {

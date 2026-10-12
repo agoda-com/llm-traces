@@ -2,19 +2,21 @@
   "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
   "type": "app",
   "name": "LLM Traces",
-  "id": "llm-traces-app",
+  "id": "agoda-llmtraces-app",
   "info": {
-    "keywords": ["llm", "traces", "openinference", "observability", "genai", "otel"],
-    "description": "LLM trace visualization for OpenInference, OTel GenAI and Vertex AI spans stored in Grafana Tempo",
+    "keywords": ["llm", "traces", "tempo", "openinference", "genai", "otel", "observability"],
+    "description": "Explore LLM traces stored in Grafana Tempo. Inspect prompts, responses, tool calls, token usage and estimated cost for OpenInference, OTel GenAI and Vertex AI spans.",
     "author": { "name": "Agoda", "url": "https://github.com/agoda-com" },
     "links": [
+      { "name": "Documentation", "url": "https://github.com/agoda-com/llm-traces#readme" },
       { "name": "Repository", "url": "https://github.com/agoda-com/llm-traces" },
       { "name": "Issues", "url": "https://github.com/agoda-com/llm-traces/issues" },
       { "name": "License", "url": "https://github.com/agoda-com/llm-traces/blob/main/LICENSE" }
     ],
     "logos": { "small": "img/logo.svg", "large": "img/logo.svg" },
     "screenshots": [
-      { "name": "LLM Traces", "path": "img/llm-traces-screenshot.png" }
+      { "name": "Trace list, span timeline and LLM span messages with tool call and result cards", "path": "img/llm-traces-screenshot.png" },
+      { "name": "Model output and the searchable tool catalog with an expanded tool definition", "path": "img/llm-traces-tool-catalog.png" }
     ],
     "version": "%VERSION%",
     "updated": "%TODAY%"

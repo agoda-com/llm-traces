@@ -20,7 +20,7 @@ import {
   TRACE_RESPONSE,
 } from './fixtures/llm-trace';
 
-const PLUGIN_URL = '/a/llm-traces-app';
+const PLUGIN_URL = '/a/agoda-llmtraces-app';
 
 // The LLM filter attributes that must appear in both the editor and the search request.
 const LLM_FILTER_ATTRS = [

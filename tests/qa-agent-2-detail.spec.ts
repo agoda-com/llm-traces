@@ -9,7 +9,7 @@
 import { test, expect, Page } from '@playwright/test';
 import { SEARCH_RESPONSE, TRACE_RESPONSE } from './fixtures/llm-trace';
 
-const PLUGIN_URL = '/a/llm-traces-app';
+const PLUGIN_URL = '/a/agoda-llmtraces-app';
 const LOAD_TIMEOUT = 10_000;
 
 async function setup(page: Page) {

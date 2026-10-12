@@ -18,7 +18,7 @@ import { test, expect, Page } from '@playwright/test';
 import { STATUS_TEST_TRACE_RESPONSE } from './fixtures/llm-trace';
 import { SEARCH_RESPONSE } from './fixtures/llm-trace';
 
-const PLUGIN_URL = '/a/llm-traces-app';
+const PLUGIN_URL = '/a/agoda-llmtraces-app';
 
 async function setup(page: Page) {
   await page.route('**/api/datasources/proxy/uid/**/api/search**', (r) =>

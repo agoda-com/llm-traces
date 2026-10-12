@@ -17,7 +17,7 @@
 import { test, expect, Page } from '@playwright/test';
 import { waitForToolbarLayout } from './waitForToolbarLayout';
 
-const PLUGIN_URL = '/a/llm-traces-app';
+const PLUGIN_URL = '/a/agoda-llmtraces-app';
 
 // ─── fixtures ────────────────────────────────────────────────────────────────
 

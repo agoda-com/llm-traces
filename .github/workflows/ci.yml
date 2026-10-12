@@ -128,9 +128,9 @@ jobs:
             -e GF_AUTH_ANONYMOUS_ENABLED=true \
             -e GF_AUTH_ANONYMOUS_ORG_ROLE=Admin \
             -e GF_DEFAULT_APP_MODE=development \
-            -e GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=llm-traces-app \
+            -e GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=agoda-llmtraces-app \
             grafana/grafana:${{ matrix.grafana }}
-          docker cp dist/. grafana:/var/lib/grafana/plugins/llm-traces-app/
+          docker cp dist/. grafana:/var/lib/grafana/plugins/agoda-llmtraces-app/
           docker cp provisioning/plugins/. grafana:/etc/grafana/provisioning/plugins/
           docker cp provisioning/datasources/tempo.yaml grafana:/etc/grafana/provisioning/datasources/tempo.yaml
           docker restart grafana

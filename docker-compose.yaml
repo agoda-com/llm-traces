@@ -38,7 +38,7 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
       GF_DEFAULT_APP_MODE: development
-      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: llm-traces-app
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: agoda-llmtraces-app
 
   seed:
     image: python:3.12-slim

@@ -6,7 +6,7 @@ import {
   TOOL_VISUALIZATION_TRACE_RESPONSE,
 } from './fixtures/llm-trace';
 
-const PLUGIN_URL = '/a/llm-traces-app';
+const PLUGIN_URL = '/a/agoda-llmtraces-app';
 
 test.describe('Tool visualization', () => {
   test.beforeEach(async ({ page, context }) => {

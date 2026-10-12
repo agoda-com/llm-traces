@@ -7,7 +7,7 @@ import { test, expect, Page } from '@playwright/test';
 import { SEARCH_RESPONSE, TRACE_RESPONSE } from './fixtures/llm-trace';
 import { waitForToolbarLayout } from './waitForToolbarLayout';
 
-const PLUGIN_URL = '/a/llm-traces-app';
+const PLUGIN_URL = '/a/agoda-llmtraces-app';
 
 async function mockTempo(page: Page) {
   await page.route('**/api/datasources/proxy/uid/**/api/search**', async (route) =>

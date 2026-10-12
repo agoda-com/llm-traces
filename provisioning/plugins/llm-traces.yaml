@@ -1,6 +1,6 @@
 apiVersion: 1
 
 apps:
-  - type: llm-traces-app
+  - type: agoda-llmtraces-app
     org_id: 1
     disabled: false

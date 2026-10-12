@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Runs the Grafana plugin validator on a release zip and fails on any error-level finding,
-# except the findings that are expected until the plugin is registered and signed:
-#   - org / missing-grafanacloud-account  (the Grafana Cloud account in the plugin ID is not registered yet)
-#   - org / scan-incomplete               (follows from the unregistered account)
-# Warnings (for example "unsigned plugin") never fail the run.
+# Runs the Grafana plugin validator on a release zip and fails on any error-level finding.
+# Warnings (for example "unsigned plugin" before the plugin is approved) never fail the run.
 #
 # Usage: scripts/validate-plugin.sh <plugin-zip>   (run from the repository root; needs network access)
 set -euo pipefail
@@ -28,15 +25,14 @@ fi
 
 jq -r '.["plugin-validator"] | to_entries[] | .key as $analyzer | .value[] | "\(.Severity)\t\($analyzer)/\(.Name)\t\(.Title) - \(.Detail)"' "$WORK/report.json"
 
-UNEXPECTED="$(jq -r '
+ERRORS="$(jq -r '
   .["plugin-validator"] | to_entries[] | .key as $analyzer | .value[]
   | select(.Severity == "error")
-  | select(($analyzer == "org" and (.Name == "missing-grafanacloud-account" or .Name == "scan-incomplete")) | not)
   | "\($analyzer)/\(.Name): \(.Title) - \(.Detail)"' "$WORK/report.json")"
 
-if [ -n "$UNEXPECTED" ]; then
-  echo "Unexpected plugin validator errors:" >&2
-  echo "$UNEXPECTED" >&2
+if [ -n "$ERRORS" ]; then
+  echo "Plugin validator errors:" >&2
+  echo "$ERRORS" >&2
   exit 1
 fi
-echo "Plugin validator: no unexpected errors."
+echo "Plugin validator: no errors."
