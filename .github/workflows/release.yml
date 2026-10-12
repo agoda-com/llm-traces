@@ -22,31 +22,44 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           sparse-checkout: |
-            plugin.json
+            /scripts/
           sparse-checkout-cone-mode: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: plugin-dist
           path: dist/
 
-      - name: Package plugin
+      - name: Verify tag matches plugin version
         run: |
-          PLUGIN_ID=$(node -p "require('./plugin.json').id")
-          VERSION="${GITHUB_REF_NAME#v}"
-          cp -r dist "${PLUGIN_ID}"
-          zip -r "${PLUGIN_ID}-${VERSION}.zip" "${PLUGIN_ID}/"
-          sha256sum "${PLUGIN_ID}-${VERSION}.zip" > "${PLUGIN_ID}-${VERSION}.zip.sha256"
-          echo "ZIP_NAME=${PLUGIN_ID}-${VERSION}.zip" >> "$GITHUB_ENV"
+          PLUGIN_VERSION=$(node -p "require('./dist/plugin.json').info.version")
+          if [ "${GITHUB_REF_NAME#v}" != "$PLUGIN_VERSION" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match the built plugin version ${PLUGIN_VERSION} (package.json version)"
+            exit 1
+          fi
+
+      - name: Sign plugin
+        if: ${{ vars.SIGN_PLUGIN == 'true' }}
+        env:
+          GRAFANA_ACCESS_POLICY_TOKEN: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
+        run: npx --yes @grafana/sign-plugin@latest
+
+      - name: Package plugin
+        run: echo "ZIP_NAME=$(scripts/package-plugin.sh .)" >> "$GITHUB_ENV"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
             ${{ env.ZIP_NAME }}
+            ${{ env.ZIP_NAME }}.sha1
             ${{ env.ZIP_NAME }}.sha256
           generate_release_notes: true
           draft: false

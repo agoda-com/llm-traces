@@ -6,7 +6,7 @@ Thank you for your interest in contributing! This guide will help you get starte
 
 - Node.js >= 22.6 (required for `--experimental-strip-types`)
 - npm >= 10
-- Docker and Docker Compose v2.17+ (for local development stack)
+- Docker and Docker Compose v2 (for the local stack: `docker compose up` builds the plugin and starts Grafana, Tempo and sample traces)
 
 ## Development Setup
 
@@ -19,11 +19,11 @@ npm install
 ## Building
 
 ```bash
-# Standalone build (recommended for contributors)
-npm run build:standalone
+# Production build into dist/ (includes source maps)
+npm run build
 
-# Watch mode (requires Grafana monorepo at ../grafana)
-npm run dev:host
+# Rebuild on every change
+npm run dev
 ```
 
 ## Running Tests
@@ -58,6 +58,12 @@ npm run lint
 - TypeScript with strict mode disabled (legacy — we're working on enabling it)
 - ESLint enforces bug-catching rules (react-hooks exhaustive-deps, no-unreachable, etc.)
 - No Prettier — formatting is not enforced beyond ESLint rules
+
+## Releasing
+
+Pushing a `v*` tag runs CI and, if it passes, publishes the plugin zip with `.sha1` and `.sha256` checksums.
+The release signs the plugin only when the repository variable `SIGN_PLUGIN` is set to `true` (using the `GRAFANA_ACCESS_POLICY_TOKEN` secret); a failed signing step fails the release.
+Otherwise the unsigned zip is published.
 
 ## Reporting Issues
 

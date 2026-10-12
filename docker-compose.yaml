@@ -1,0 +1,53 @@
+# Reviewer / development stack: Grafana with the plugin built from source, Tempo, and sample LLM traces.
+#
+# Usage (from a fresh clone, no other commands needed):
+#   docker compose up
+#
+# Then open http://localhost:3000 (anonymous Admin) and select "LLM Traces" in the side menu.
+# The first start compiles the plugin inside Docker and takes a few minutes.
+# Sample traces appear about 20 seconds after Tempo is ready.
+#
+# Host ports can be overridden when the defaults are taken:
+#   GRAFANA_PORT=3201 TEMPO_OTLP_HTTP_PORT=14318 TEMPO_OTLP_GRPC_PORT=14317 docker compose up
+#
+# After changing plugin sources, rebuild with: docker compose up --build
+# Remove everything, including stored traces, with: docker compose down -v
+# Requires Docker Compose v2.
+
+name: llm-traces
+
+services:
+  tempo:
+    image: grafana/tempo:2.7.2
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./provisioning/tempo/tempo.yaml:/etc/tempo.yaml:ro
+    ports:
+      - "${TEMPO_OTLP_GRPC_PORT:-4317}:4317"
+      - "${TEMPO_OTLP_HTTP_PORT:-4318}:4318"
+
+  grafana:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    depends_on:
+      - tempo
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_DEFAULT_APP_MODE: development
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: llm-traces-app
+
+  seed:
+    image: python:3.12-slim
+    depends_on:
+      - tempo
+    restart: "no"
+    working_dir: /seed
+    volumes:
+      - ./scripts/inject_traces.py:/seed/inject_traces.py:ro
+      - ./scripts/requirements.txt:/seed/requirements.txt:ro
+    command: >
+      sh -c "pip install --no-cache-dir --quiet --disable-pip-version-check --root-user-action=ignore -r requirements.txt && python inject_traces.py"

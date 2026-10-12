@@ -1,8 +1,10 @@
 """
 Injects realistic OpenInference LLM traces into local Tempo for development.
 """
-import time
 import json
+import sys
+import time
+import urllib.request
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -10,6 +12,7 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.trace import SpanKind
 
+TEMPO_URL = "http://tempo:3200"
 TEMPO_ENDPOINT = "http://tempo:4318/v1/traces"
 
 SERVICES = [
@@ -74,6 +77,19 @@ SERVICES = [
 ]
 
 
+def wait_for_tempo(timeout_s: int = 180) -> None:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(f"{TEMPO_URL}/ready", timeout=3) as response:
+                if response.status == 200:
+                    return
+        except OSError:
+            pass
+        time.sleep(2)
+    sys.exit(f"Tempo was not ready at {TEMPO_URL}/ready after {timeout_s}s")
+
+
 def inject_service(service: dict):
     resource = Resource.create({"service.name": service["name"]})
     provider = TracerProvider(resource=resource)
@@ -91,13 +107,15 @@ def inject_service(service: dict):
                         span.set_attribute(k, v)
                     time.sleep(span_def["duration_ms"] / 1000)
 
-    provider.force_flush()
+    if not provider.force_flush():
+        sys.exit(f"Failed to export traces for {service['name']} to {TEMPO_ENDPOINT}")
     provider.shutdown()
     print(f"Injected traces for {service['name']}")
 
 
 if __name__ == "__main__":
     print("Injecting LLM traces into Tempo...")
+    wait_for_tempo()
     for svc in SERVICES:
         inject_service(svc)
     print("Done.")

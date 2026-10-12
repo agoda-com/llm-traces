@@ -1,7 +1,7 @@
 # LLM Traces — Grafana Plugin
 
 [![CI](https://github.com/agoda-com/llm-traces/actions/workflows/ci.yml/badge.svg)](https://github.com/agoda-com/llm-traces/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/agoda-com/llm-traces/blob/main/LICENSE)
 
 A Grafana app plugin for visualizing LLM (Large Language Model) traces stored in [Grafana Tempo](https://grafana.com/oss/tempo/).
 
@@ -21,7 +21,7 @@ Supports multiple span conventions out of the box:
 - Trace timeline with span hierarchy visualization
 - Resizable detail panels
 
-<img src="docs/images/llm-traces-screenshot.png" alt="LLM Traces plugin showing trace list, span timeline with duration bars, and LLM span detail with input/output messages" width="100%">
+<img src="https://raw.githubusercontent.com/agoda-com/llm-traces/main/docs/images/llm-traces-screenshot.png" alt="LLM Traces plugin showing trace list, span timeline with duration bars, and LLM span detail with input/output messages" width="100%">
 
 ## Requirements
 
@@ -49,19 +49,20 @@ Supports multiple span conventions out of the box:
 
 ### Using Docker Compose
 
-A ready-to-run stack with Grafana + Tempo is included for local development:
+A single command starts Grafana with the plugin, a provisioned Tempo data source, and sample LLM traces.
+Docker builds the plugin from source, so Node.js and a prior build are not needed:
 
 ```bash
-# Build the plugin first
-npm install && npm run build:standalone
-
-# Start the stack (run from repo root)
-docker compose -f docker/docker-compose.yml up --build
+docker compose up
 ```
 
-Open **http://localhost:3000** (admin / admin). Tempo OTLP endpoints are available at `localhost:4317` (gRPC) and `localhost:4318` (HTTP).
+The first start compiles the plugin inside Docker and takes a few minutes.
+Open **http://localhost:3000** (anonymous admin access), select **LLM Traces** in the side menu, and wait about 20 seconds after startup for the sample traces to appear.
+Tempo accepts OTLP at `localhost:4317` (gRPC) and `localhost:4318` (HTTP), so you can send your own traces too.
+If a default host port is taken, set `GRAFANA_PORT`, `TEMPO_OTLP_HTTP_PORT` or `TEMPO_OTLP_GRPC_PORT`.
+Stop the stack and delete its data with `docker compose down -v`.
 
-> Requires Docker Compose v2.17+ for `dockerfile_inline` support.
+> Requires Docker Compose v2.
 
 ### Using provisioning
 
@@ -90,8 +91,11 @@ apps:
 # Install dependencies (also sets up pre-commit hook via Husky)
 npm install
 
-# Build (standalone — no Grafana monorepo needed)
-npm run build:standalone
+# Build the plugin into dist/
+npm run build
+
+# Rebuild on every change
+npm run dev
 
 # Run all unit tests
 npm test
@@ -109,10 +113,10 @@ npm run lint
 
 > **Note:** Node.js >= 22.6 is required for the `--experimental-strip-types` flag used by the test runner and build scripts.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed contribution guidelines.
+See [CONTRIBUTING.md](https://github.com/agoda-com/llm-traces/blob/main/CONTRIBUTING.md) for detailed contribution guidelines.
 
 ## License
 
-[Apache-2.0](LICENSE)
+[Apache-2.0](https://github.com/agoda-com/llm-traces/blob/main/LICENSE)
 
 Copyright 2026 Agoda Services Co., Ltd.

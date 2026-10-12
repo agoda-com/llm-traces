@@ -1,0 +1,8 @@
+node_modules
+dist
+.git
+.idea
+.claude
+test-results
+playwright-report
+docs
