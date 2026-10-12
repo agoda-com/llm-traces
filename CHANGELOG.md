@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.2 - 2026-10-13
+
+### Bug Fixes
+- Google ADK (`gcp.vertex.agent`) spans render their conversation: the system instruction, user, model and context messages, `functionCall` and `functionResponse` parts as tool call and tool result cards, the tool catalog from `config.tools`, and the response from ADK's `content` and `usageMetadata` format. Both ADK Java and ADK Python attribute names are supported.
+- `call_llm` spans are shown as LLM spans, and ADK `execute_tool` spans show their arguments and response as tool cards.
+- ADK spans without captured content (`ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false`) or with payloads ADK could not serialize show an explicit notice instead of looking empty.
+- JSON-valued attributes are parsed before unicode escapes are decoded for display. Previously some valid request and response payloads failed to parse and their messages silently disappeared.
+- The Share button builds its link with Grafana's `locationService` and `appUrl` instead of reading `window.location`, which also keeps links correct when Grafana is served from a sub-path.
+
+### Maintenance
+- CI runs the full Grafana plugin validator, including its code rules, and fails on any code-rule finding.
+
 ## 0.1.1 - 2026-10-12
 
 ### Breaking Changes

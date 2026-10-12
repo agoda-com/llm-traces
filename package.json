@@ -1,6 +1,6 @@
 {
   "name": "agoda-llmtraces-app",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Grafana app plugin for visualizing LLM traces stored in Tempo",
   "license": "Apache-2.0",
   "author": "Agoda",
