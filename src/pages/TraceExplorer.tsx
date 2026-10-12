@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import { useResize } from '../utils/useResize';
 
 import { dateTime, dateMath, TimeRange } from '@grafana/data';
-import { locationService } from '@grafana/runtime';
+import { config, locationService } from '@grafana/runtime';
 import { useStyles2, useTheme2, Button, ClipboardButton, Select, Alert, Icon, LoadingPlaceholder, TimeRangePicker } from '@grafana/ui';
 
 import { TraceDetailView } from '../components/TraceDetail';
@@ -19,6 +19,7 @@ import {
 } from '../utils/queryBuilder';
 import { formatDuration, formatTime } from '../utils/formatUtils';
 import { scrollWithinContainer } from '../utils/scrollUtils';
+import { buildShareUrl } from '../utils/shareUrl';
 import { useDatasource } from '../hooks/useDatasource';
 import { useOpenTrace } from '../hooks/useOpenTrace';
 import { useTraceSearch } from '../hooks/useTraceSearch';
@@ -344,7 +345,7 @@ export function TraceExplorer() {
           <ClipboardButton
             icon="share-alt"
             variant="secondary"
-            getText={() => window.location.href}
+            getText={() => buildShareUrl(config.appUrl, locationService.getLocation())}
             title="Copy share link"
           >
             Share
