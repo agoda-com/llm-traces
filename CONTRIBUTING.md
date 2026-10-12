@@ -45,12 +45,14 @@ npm run lint
 4. Ensure all checks pass: `npm run typecheck && npm run lint && npm test`
 5. Commit with a clear message
 6. Open a pull request
+7. Sign the [Contributor License Agreement](https://github.com/agoda-com/.github/blob/main/CLA.md) if you have not already signed it
 
 ## Pull Request Guidelines
 
+- Every contributor must agree to the [Agoda Contributor License Agreement](https://github.com/agoda-com/.github/blob/main/CLA.md) before a PR can be merged
 - Keep PRs focused — one feature or fix per PR
 - Include tests for new logic (unit tests in `tests/`)
-- Ensure the pre-commit hook passes (typecheck + lint + unit tests)
+- Ensure the pre-commit hook passes (runs typecheck, lint and unit tests; installed by `npm install` via husky)
 - Update the CHANGELOG if applicable
 
 ## Code Style

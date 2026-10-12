@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output and packaging artifacts
+dist/
+*.zip
+*.zip.sha1
+*.zip.sha256
+*.zip.md5
+*.tgz
+
+# Test output
+test-results/
+playwright-report/
+playwright/.cache/
+coverage/
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Tooling caches and logs
+.eslintcache
+*.tsbuildinfo
+npm-debug.log*
+
+# Editors, OS and local agent state
+.idea/
+.vscode/
+.claude/
+.DS_Store

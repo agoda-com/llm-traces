@@ -1,7 +1,9 @@
 ---
 name: Feature Request
 about: Suggest a feature for the LLM Traces plugin
+title: ''
 labels: enhancement
+assignees: ''
 ---
 
 **Description**

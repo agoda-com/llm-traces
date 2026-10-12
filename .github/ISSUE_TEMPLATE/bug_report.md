@@ -1,7 +1,9 @@
 ---
 name: Bug Report
 about: Report a bug in the LLM Traces plugin
+title: ''
 labels: bug
+assignees: ''
 ---
 
 **Describe the bug**
