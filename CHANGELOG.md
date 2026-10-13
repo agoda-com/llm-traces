@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.5 - 2026-10-14
+
+### Features
+- Agent graph. The **Graph** button shows the trace as a graph below the span tree, with a node per agent, tool, model, guardrail and retriever, and their call counts, total time and failures.
+- The graph follows `graph.node.id` and `graph.node.parent_id` when spans declare them, LangGraph `metadata` otherwise, and the span nesting when neither is present.
+- Click a node to select its first call, and click it again to step through the rest. Selecting a span in the tree highlights its node.
+- The mouse wheel and trackpad zoom the graph around the pointer, and dragging pans it. The graph opens at a readable size, and the trace list folds away while the graph is shown if the span list needs the room.
+- **AI only** and **Graph** are labelled buttons at the start of the span list toolbar.
+- The `docker compose` sample environment includes a multi-agent trace, `plan_weekend_trip`.
+
+### Bug Fixes
+- Long agent descriptions in the span detail header are cut to three lines, with **Show more**.
+- When an agent span declares `graph.node.parent_id`, the span list and the detail header name that node as the agent that handed off, so they match the graph.
+
+### Documentation
+- The README is rewritten, with new screenshots of the agent tree and the agent graph.
+
 ## 0.1.4 - 2026-10-13
 
 ### Features

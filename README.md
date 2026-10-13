@@ -152,7 +152,7 @@ Then:
    The trace list fills and the newest trace opens.
    If the list is empty, wait a few seconds and click **Search** again.
 4. Open `plan_weekend_trip` and click **Graph**.
-   A router agent calls two specialist agents, one of them as a tool, and the graph shows the tools they run and how often.
+   The `lead` agent calls two specialist agents, one of them as a tool, and the graph shows the tools they run and how often.
 5. Open `support_agent_run` and click its second `llm claude-sonnet-4-5` span to see a tool call card, a tool result card and the tool catalog under **Available Tools**.
 
 The other three traces are single chat calls: two in OpenInference and one in OTel GenAI with a tool call.
