@@ -228,7 +228,7 @@ export const getStyles = (theme: GrafanaTheme2) => ({
     fontSize: '11px',
     color: theme.colors.text.secondary,
     display: 'flex',
-    gap: theme.spacing(1.5),
+    gap: `${theme.spacing(0.25)} ${theme.spacing(1.5)}`,
     flexWrap: 'wrap',
     fontFamily: theme.typography.fontFamilyMonospace,
   }),

@@ -6,7 +6,7 @@ import { useStyles2, useTheme2, Alert, Icon } from '@grafana/ui';
 import { getStyles, SPAN_DETAIL_RESERVED_WIDTH, SPAN_LIST_MIN_WIDTH } from './TraceDetail.styles';
 
 import { PluginSpan, flattenTree, getTraceDurationMs, getTraceStartMs } from '../utils/tempoClient';
-import { isLlmSpan, isGuardrailSpan, isAiSpan, extractLlmSpanData } from '../utils/llmUtils';
+import { isLlmSpan, isGuardrailSpan, isAiSpan, extractLlmSpanData, getSpanDisplayName } from '../utils/llmUtils';
 import { estimateCost, formatCost } from '../utils/costUtils';
 import { formatDuration } from '../utils/formatUtils';
 import { clampNameColumnFraction, loadNameColumnFraction, saveNameColumnFraction } from '../utils/nameColumn';
@@ -206,6 +206,7 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
     if (q) {
       result = result.filter((span) => {
         if (span.operationName.toLowerCase().includes(q)) { return true; }
+        if (getSpanDisplayName(span.operationName, span.tags).toLowerCase().includes(q)) { return true; }
         if (span.serviceName.toLowerCase().includes(q)) { return true; }
         return span.tags.some(
           (t) => t.key.toLowerCase().includes(q) || String(t.value).toLowerCase().includes(q)

@@ -9,7 +9,7 @@ import { getAncestorIds } from '../utils/traceTree';
 import { hiddenLevelsWidth, layoutGuides } from '../utils/guideLayout';
 import { SpanAgent } from '../utils/traceTree';
 import { AgentColor, pickAgentColor } from '../utils/agentColors';
-import { getSpanKindColor, getSpanKind } from '../utils/llmUtils';
+import { getSpanKindColor, getSpanKind, getSpanDisplayName } from '../utils/llmUtils';
 import { formatDuration } from '../utils/formatUtils';
 import { KindIcon } from './KindIcon';
 
@@ -423,7 +423,7 @@ export const SpanRow = memo(function SpanRow({ span, top, isSelected, isExpanded
           {isAgentSpan ? (
             <span className={cx(styles.spanName, styles.agentLabel)} title={span.operationName} data-testid="span-agent-label">{agent.name}</span>
           ) : (
-            <span className={styles.spanName} title={span.operationName} data-testid="span-operation-name">{span.operationName}</span>
+            <span className={styles.spanName} title={span.operationName} data-testid="span-operation-name">{getSpanDisplayName(span.operationName, span.tags)}</span>
           )}
           {isOrphaned && (
             <span

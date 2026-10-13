@@ -1633,6 +1633,24 @@ test.describe('Vercel AI SDK', () => {
     await expect(page.getByTestId('output-section').getByText('It is 21 degrees and sunny in Paris.')).toBeVisible();
   });
 
+  test('the tree rows carry the same names as the detail title, with the raw name as tooltip', async ({ page }) => {
+    await openConventionTrace(page, VERCEL_AI_TRACE, 'aispan0000000001');
+    const rowName = (spanId: string) => page.getByTestId(`span-row-${spanId}`).getByTestId('span-operation-name');
+    await expect(rowName('aispan0000000001')).toHaveText('weather-agent:ai.generateText');
+    await expect(rowName('aispan0000000001')).toHaveAttribute('title', 'ai.generateText');
+    await expect(rowName('aispan0000000002')).toHaveText('weather-agent:ai.generateText.doGenerate');
+    await expect(rowName('aispan0000000003')).toHaveText('getWeather');
+    await expect(rowName('aispan0000000003')).toHaveAttribute('title', 'ai.toolCall');
+    await expect(page.getByTestId('span-header-raw-name')).toHaveText('weather-agent:ai.generateText');
+  });
+
+  test('the span filter matches the name shown in the tree', async ({ page }) => {
+    await openConventionTrace(page, VERCEL_AI_TRACE, 'aispan0000000001');
+    await page.getByTestId('span-filter-input').fill('weather-agent:ai.generateText.doGenerate');
+    await expect(page.getByTestId('span-filter-count')).toHaveText('1 match');
+    await expect(page.getByTestId('span-row-aispan0000000002')).toBeVisible();
+  });
+
   test('trace totals count the model calls once, not the wrapper', async ({ page }) => {
     await openConventionTrace(page, VERCEL_AI_TRACE, 'aispan0000000001');
     // Model calls: 90+15 and 90+25 tokens. The wrapper repeats 180+40 and is not counted.
@@ -1687,6 +1705,15 @@ test.describe('Pydantic AI', () => {
     await expect(page.getByTestId('llm-span-kind')).toContainText('AGENT');
     await expect(detail.getByTestId('input-messages-section').getByTestId('message-block-system')).toContainText('You write jokes about the topic');
     await expect(detail.getByTestId('output-section')).toContainText('Too many tells.');
+  });
+
+  test('the tree rows show the logfire message, with the raw name as tooltip', async ({ page }) => {
+    await openConventionTrace(page, PYDANTIC_AI_TRACE, 'pydspan00000003');
+    const toolName = page.getByTestId('span-row-pydspan00000003').getByTestId('span-operation-name');
+    await expect(toolName).toHaveText('running tool: get_pun');
+    await expect(toolName).toHaveAttribute('title', 'running tool');
+    await expect(page.getByTestId('span-header-raw-name')).toHaveText('running tool: get_pun');
+    await expect(page.getByTestId('span-row-pydspan00000001').getByTestId('span-agent-label')).toHaveText('joke_agent');
   });
 
   test('model call shows the tool definitions, the tool call it requests and the reported cost', async ({ page }) => {
@@ -1759,6 +1786,14 @@ test.describe('Traceloop and MLflow', () => {
     await expect(page.getByTestId('llm-span-kind')).toContainText('TOOL');
     await expect(page.getByTestId('llm-span-detail').getByTestId('message-part-tool_call')).toContainText('lookup');
     await expect(page.getByTestId('llm-span-detail').getByTestId('message-part-tool_result')).toContainText('Cats are mammals.');
+  });
+
+  test('a Traceloop agent span is named by its entity and owns the tool below it', async ({ page }) => {
+    await openConventionTrace(page, TRACELOOP_TRACE, 'tlspan000000003');
+    await expect(page.getByTestId('span-row-tlspan000000003').getByTestId('span-agent-label')).toHaveText('research_agent');
+    await expect(page.getByTestId('span-row-tlspan000000002').getByTestId('span-owner-chip')).toHaveText('research_agent');
+    await expect(page.getByTestId('span-header-kind')).toHaveText('Agent');
+    await expect(page.getByTestId('span-header-agent')).toHaveText('research_agent');
   });
 
   test('MLflow chain and chat model spans', async ({ page }) => {

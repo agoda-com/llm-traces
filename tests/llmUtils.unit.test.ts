@@ -2254,6 +2254,22 @@ describe('getAgentName - attribute and span name conventions', () => {
   assertEquals(getAgentName([kv('gen_ai.agent.name', 'caf\\u00e9')]), 'café', 'unicode escapes in the attribute are decoded');
 });
 
+describe('getAgentName - framework attributes', () => {
+  // Pydantic AI before instrumentation version 3 records only agent_name on the agent run span.
+  assertEquals(getAgentName([kv('agent_name', 'joke_agent')], 'agent run'), 'joke_agent', 'Pydantic AI agent_name');
+  assertEquals(getAgentName([kv('agent_name', 'joke_agent'), kv('gen_ai.agent.name', 'router')]), 'router', 'gen_ai.agent.name wins over agent_name');
+  assertEquals(getAgentName([kv('agent_name', 'joke_agent'), kv('agent.name', 'planner')]), 'planner', 'agent.name wins over agent_name');
+  assertEquals(getAgentName([kv('agent_name', 'joke_agent')], 'invoke_agent other'), 'joke_agent', 'agent_name wins over the span name');
+  assertEquals(getAgentName([kv('agent_name', ' ')], 'invoke_agent planner'), 'planner', 'a blank agent_name falls through to the span name');
+
+  // Traceloop @agent spans record the decorated entity's name in traceloop.entity.name.
+  assertEquals(getAgentName([kv('traceloop.span.kind', 'agent'), kv('traceloop.entity.name', 'travel_agent')], 'travel_agent.agent'), 'travel_agent', 'Traceloop agent entity name');
+  assertEquals(getAgentName([kv('traceloop.span.kind', 'agent'), kv('traceloop.entity.name', 'travel_agent'), kv('gen_ai.agent.name', 'router')]), 'router', 'gen_ai.agent.name wins over the Traceloop entity name');
+  assertEquals(getAgentName([kv('traceloop.span.kind', 'tool'), kv('traceloop.entity.name', 'lookup')]), undefined, 'a Traceloop tool entity is not an agent name');
+  assertEquals(getAgentName([kv('traceloop.span.kind', 'workflow'), kv('traceloop.entity.name', 'joke_flow')]), undefined, 'a Traceloop workflow entity is not an agent name');
+  assertEquals(getAgentName([kv('traceloop.entity.name', 'travel_agent')]), undefined, 'an entity name without the agent span kind is not an agent name');
+});
+
 describe('getAgentDescription', () => {
   assertEquals(getAgentDescription([kv('gen_ai.agent.description', 'Plans trips')]), 'Plans trips', 'description attribute');
   assertEquals(getAgentDescription([kv('gen_ai.agent.description', ' ')]), undefined, 'a blank description is none');

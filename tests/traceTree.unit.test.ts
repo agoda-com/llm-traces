@@ -208,6 +208,22 @@ describe('agent ownership - unnamed agent spans and several roots', () => {
   assertEquals(getSpanAgents([]).size, 0, 'an empty trace has no agents');
 });
 
+describe('agent ownership - agent names of framework conventions', () => {
+  const pydantic = makeSpan('pyd', null, [{ key: 'agent_name', value: 'joke_agent' }, { key: 'pydantic_ai.all_messages', value: '[]' }], 'agent run');
+  const pydanticTool = makeSpan('pyd-tool', pydantic, [{ key: 'tool_arguments', value: '{}' }], 'running tool');
+  const traceloop = makeSpan('tl', null, [{ key: 'traceloop.span.kind', value: 'agent' }, { key: 'traceloop.entity.name', value: 'travel_agent' }], 'travel_agent.agent');
+  const traceloopTool = makeSpan('tl-tool', traceloop, [{ key: 'traceloop.span.kind', value: 'tool' }, { key: 'traceloop.entity.name', value: 'lookup' }], 'lookup.tool');
+  const langfuse = makeSpan('lf', null, [{ key: 'langfuse.observation.type', value: 'agent' }], 'support-bot');
+  const mlflow = makeSpan('ml', null, [{ key: 'mlflow.spanType', value: '"AGENT"' }], 'qa_agent');
+  const agents = getSpanAgents([pydantic, traceloop, langfuse, mlflow]);
+  assertEquals(agents.get('pyd')?.name, 'joke_agent', 'a Pydantic AI agent span is named by agent_name');
+  assertEquals(agents.get(pydanticTool.spanId)?.name, 'joke_agent', 'its tool span belongs to it');
+  assertEquals(agents.get('tl')?.name, 'travel_agent', 'a Traceloop agent span is named by traceloop.entity.name');
+  assertEquals(agents.get(traceloopTool.spanId)?.name, 'travel_agent', 'its tool span belongs to the agent, not to the tool entity name');
+  assertEquals(agents.get('lf')?.name, 'support-bot', 'a Langfuse agent observation is named after its span');
+  assertEquals(agents.get('ml')?.name, 'qa_agent', 'an MLflow agent span is named after its span');
+});
+
 describe('agent ownership - 5,000-level chain of agents', () => {
   const chain: PluginSpan[] = [];
   for (let i = 0; i < 5000; i++) {

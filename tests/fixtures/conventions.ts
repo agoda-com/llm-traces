@@ -538,8 +538,21 @@ export const TRACELOOP_TRACE = buildTrace(CONVENTION_TRACE_ID, { name: 'opentele
     },
   },
   {
-    spanId: 'tlspan000000002',
+    spanId: 'tlspan000000003',
     parentSpanId: 'tlspan000000001',
+    name: 'research_agent.agent',
+    startMs: 50,
+    endMs: 1200,
+    attributes: {
+      'traceloop.span.kind': 'agent',
+      'traceloop.entity.name': 'research_agent',
+      'traceloop.entity.input': '{"args":["cats"],"kwargs":{}}',
+      'traceloop.entity.output': '"Cats are mammals."',
+    },
+  },
+  {
+    spanId: 'tlspan000000002',
+    parentSpanId: 'tlspan000000003',
     name: 'lookup.tool',
     startMs: 100,
     endMs: 400,

@@ -1902,12 +1902,16 @@ function getNonBlankAttr(tags: KeyValuePair[], key: string): string | undefined 
  * Returns the agent name across all supported conventions, first match wins:
  *   - gen_ai.agent.name  (OTel GenAI spec + modern OpenInference >= 1.4)
  *   - agent.name
+ *   - agent_name  (Pydantic AI before instrumentation version 3)
+ *   - traceloop.entity.name  (only on Traceloop agent spans; other entities are not agents)
  *   - the <name> of a span name such as "invoke_agent <name>"
  * Returns undefined when none of them is present.
  */
 export function getAgentName(tags: KeyValuePair[], spanName?: string): string | undefined {
   return getNonBlankAttr(tags, 'gen_ai.agent.name')
     ?? getNonBlankAttr(tags, 'agent.name')
+    ?? getNonBlankAttr(tags, 'agent_name')
+    ?? (getTraceloopKind(tags) === 'AGENT' ? getNonBlankAttr(tags, 'traceloop.entity.name') : undefined)
     ?? spanName?.match(AGENT_SPAN_NAME)?.[1];
 }
 
