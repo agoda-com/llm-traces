@@ -9,22 +9,12 @@ import { PluginSpan, flattenTree, getTraceDurationMs, getTraceStartMs } from '..
 import { isLlmSpan, isGuardrailSpan, isAiSpan, extractLlmSpanData } from '../utils/llmUtils';
 import { estimateCost, formatCost } from '../utils/costUtils';
 import { formatDuration } from '../utils/formatUtils';
-import { scrollWithinContainer } from '../utils/scrollUtils';
-import { SpanRow } from './SpanRow';
+import { clampNameColumnFraction, loadNameColumnFraction, saveNameColumnFraction } from '../utils/nameColumn';
+import { collapseOneLevel, expandOneLevel, getParentSpanIds, getVisibleSpans, indexSpans, revealSpan } from '../utils/traceTree';
+import { useVirtualList } from '../utils/useVirtualList';
+import { GuideContext, NAME_MIN_WIDTH, SPAN_ROW_HEIGHT, SpanRow } from './SpanRow';
 import { SpanDetailPanel } from './SpanDetailPanel';
-
-/** Recursively collect spanIds that have children (for collapse-all). Leaf spans are skipped. */
-function getAllSpanIds(spans: PluginSpan[]): string[] {
-  const ids: string[] = [];
-  const visit = (s: PluginSpan) => {
-    if (s.children.length > 0) {
-      ids.push(s.spanId);
-      s.children.forEach(visit);
-    }
-  };
-  spans.forEach(visit);
-  return ids;
-}
+import { NameColumnResizer } from './NameColumnResizer';
 
 interface TraceDetailViewProps {
   traceId: string;
@@ -49,7 +39,18 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
   // BUG-077: flag set by Escape to prevent auto-re-selection via firstLlmSpan
   const [userDismissedDetail, setUserDismissedDetail] = useState(false);
   const { width: spanListWidth, onMouseDown: onSpanListResize } = useResize(500, SPAN_LIST_MIN_WIDTH, 900);
+  const [nameColumnFraction, setNameColumnFraction] = useState(loadNameColumnFraction);
+  const [hoveredGuideIds, setHoveredGuideIds] = useState<Set<string>>(() => new Set());
+  const [paneElement, setPaneElement] = useState<HTMLDivElement | null>(null);
+  const [listElement, setListElement] = useState<HTMLDivElement | null>(null);
+  const [nameHeaderElement, setNameHeaderElement] = useState<HTMLDivElement | null>(null);
+  // Until the header is measured, assume the default pane width and name column.
+  const [nameColumnWidth, setNameColumnWidth] = useState(200);
+  const listHeaderRef = useRef<HTMLDivElement>(null);
+  const columnHeaderRef = useRef<HTMLDivElement>(null);
   const displayedSpansRef = useRef<PluginSpan[]>([]);
+  const displayedIndexByIdRef = useRef<Map<string, number>>(new Map());
+  const spanByIdRef = useRef<Map<string, PluginSpan>>(new Map());
   const effectiveSelectedRef = useRef<string | null>(null);
 
   // Reset span selection and filter state when a new trace is opened
@@ -61,6 +62,10 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
     setSpanFilter('');
     setUserDismissedDetail(false);
   }, [traceId, openCount]);
+
+  const flatSpans = useMemo(() => spans ? flattenTree(spans) : [], [spans]);
+  const spanById = useMemo(() => indexSpans(flatSpans), [flatSpans]);
+  spanByIdRef.current = spanById;
 
   const handleToggleExpand = useCallback((spanId: string) => {
     setCollapsed((prev) => {
@@ -75,43 +80,67 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
   }, []);
 
   const handleCollapseAll = useCallback(() => {
-    if (!spans) { return; }
     // BUG-058: clear text filter when collapsing all to avoid silently hiding matching spans
     setSpanFilter('');
+    const allParentIds = getParentSpanIds(flatSpans);
     // BUG-023: when AI-only mode is active, skip collapsing direct parents of AI spans
     if (aiOnly) {
-      const flatAll = flattenTree(spans);
       const aiSpanParentIds = new Set<string>(
-        flatAll
+        flatSpans
           .filter((s) => isAiSpan(s.tags) && s.parentSpanId)
           .map((s) => s.parentSpanId!)
       );
-      const allParentIds = getAllSpanIds(spans);
       setCollapsed(new Set(allParentIds.filter((id) => !aiSpanParentIds.has(id))));
     } else {
-      setCollapsed(new Set(getAllSpanIds(spans)));
+      setCollapsed(new Set(allParentIds));
     }
-  }, [spans, aiOnly]);
+  }, [flatSpans, aiOnly]);
 
   const handleExpandAll = useCallback(() => {
     setCollapsed(new Set());
   }, []);
 
-  const handleSelectSpan = useCallback((span: PluginSpan) => {
-    setUserDismissedDetail(false);
-    setSelectedSpanId(span.spanId);
+  const handleCollapseOne = useCallback(() => {
+    setSpanFilter('');
+    setCollapsed((prev) => collapseOneLevel(flatSpans, prev));
+  }, [flatSpans]);
+
+  const handleExpandOne = useCallback(() => {
+    setCollapsed((prev) => expandOneLevel(flatSpans, prev));
+  }, [flatSpans]);
+
+  // Selecting a span opens the collapsed spans above it, so the selection is never hidden.
+  const selectSpan = useCallback((spanId: string) => {
+    setCollapsed((prev) => revealSpan(spanId, spanByIdRef.current, prev));
+    setSelectedSpanId(spanId);
   }, []);
 
-  // Scroll selected span into view when selection changes
-  useEffect(() => {
-    if (!selectedSpanId) { return; }
-    const container = containerRef.current;
-    const el = (container ?? document).querySelector(`[data-testid="span-row-${selectedSpanId}"]`);
-    const pane = el?.closest('[data-testid="span-list-pane"]');
-    if (el && pane) { scrollWithinContainer(el, pane, 'smooth'); }
-  }, [selectedSpanId]);
+  const handleSelectSpan = useCallback((span: PluginSpan) => {
+    setUserDismissedDetail(false);
+    selectSpan(span.spanId);
+  }, [selectSpan]);
 
-  const flatSpans = useMemo(() => spans ? flattenTree(spans) : [], [spans]);
+  const handleGuideHoverStart = useCallback((ancestorId: string) => {
+    setHoveredGuideIds((prev) => (prev.has(ancestorId) ? prev : new Set(prev).add(ancestorId)));
+  }, []);
+
+  const handleGuideHoverEnd = useCallback((ancestorId: string) => {
+    setHoveredGuideIds((prev) => {
+      if (!prev.has(ancestorId)) { return prev; }
+      const next = new Set(prev);
+      next.delete(ancestorId);
+      return next;
+    });
+  }, []);
+
+  const collapseActionsRef = useRef({ collapseAll: handleCollapseAll, expandAll: handleExpandAll, collapseOne: handleCollapseOne, expandOne: handleExpandOne });
+  collapseActionsRef.current = { collapseAll: handleCollapseAll, expandAll: handleExpandAll, collapseOne: handleCollapseOne, expandOne: handleExpandOne };
+
+  const handleNameColumnResize = useCallback((fraction: number) => {
+    const clamped = clampNameColumnFraction(fraction);
+    setNameColumnFraction(clamped);
+    saveNameColumnFraction(clamped);
+  }, []);
 
   // Derive trace display name from the root span (no parent) when the prop-passed rootName is blank.
   // Note: Tempo may return "<root span not yet received>" as rootTraceName — this is normal and
@@ -165,17 +194,7 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
   }, [flatSpans]);
 
   // Build visible spans respecting collapse state
-  const visibleSpans = useMemo(() => {
-    const result: PluginSpan[] = [];
-    const visitSpan = (span: PluginSpan) => {
-      result.push(span);
-      if (!collapsed.has(span.spanId)) {
-        for (const child of span.children) { visitSpan(child); }
-      }
-    };
-    if (spans) { for (const root of spans) { visitSpan(root); } }
-    return result;
-  }, [spans, collapsed]);
+  const visibleSpans = useMemo(() => spans ? getVisibleSpans(spans, collapsed) : [], [spans, collapsed]);
 
   const displayedSpans = useMemo(() => {
     let result = aiOnly ? visibleSpans.filter((span) => isAiSpan(span.tags)) : visibleSpans;
@@ -194,8 +213,64 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
 
   displayedSpansRef.current = displayedSpans;
 
+  // First row of each span id, so selection and scrolling find a row without scanning the list.
+  const displayedIndexById = useMemo(() => {
+    const indexById = new Map<string, number>();
+    displayedSpans.forEach((span, i) => {
+      if (!indexById.has(span.spanId)) { indexById.set(span.spanId, i); }
+    });
+    return indexById;
+  }, [displayedSpans]);
+  displayedIndexByIdRef.current = displayedIndexById;
+
   // Derive effective selected span: if selectedSpanId is not in displayedSpans, treat as null
-  const effectiveSelectedSpanId = displayedSpans.some((s) => s.spanId === selectedSpanId) ? selectedSpanId : null;
+  const effectiveSelectedSpanId = selectedSpanId !== null && displayedIndexById.has(selectedSpanId) ? selectedSpanId : null;
+
+  // BUG-006: the shallowest AI span is drawn at depth 0 in AI-only mode
+  const minAiDepth = useMemo(() => {
+    if (!aiOnly) { return 0; }
+    let min = Infinity;
+    for (const span of displayedSpans) { min = Math.min(min, span.depth ?? 0); }
+    return min === Infinity ? 0 : min;
+  }, [aiOnly, displayedSpans]);
+
+  // Rows share the width of the name column in the header, which is where the guides, name and chevron have to fit.
+  useLayoutEffect(() => {
+    if (!nameHeaderElement) { return undefined; }
+    const measure = () => setNameColumnWidth(Math.floor(nameHeaderElement.getBoundingClientRect().width));
+    measure();
+    const resizeObserver = new ResizeObserver(measure);
+    resizeObserver.observe(nameHeaderElement);
+    return () => resizeObserver.disconnect();
+  }, [nameHeaderElement]);
+
+  const remPx = useMemo(() => parseFloat(window.getComputedStyle(document.documentElement).fontSize) || 16, []);
+
+  const { start: renderedStart, end: renderedEnd, scrollToIndex } = useVirtualList({
+    scrollElement: paneElement,
+    listElement,
+    itemCount: displayedSpans.length,
+    itemHeight: SPAN_ROW_HEIGHT,
+  });
+
+  const guideContext = useMemo<GuideContext>(() => ({
+    spanById,
+    indexById: displayedIndexById,
+    renderedStart,
+    renderedEnd,
+    remPx,
+    guideAreaMax: nameColumnWidth - NAME_MIN_WIDTH,
+    hoveredIds: hoveredGuideIds,
+    onHoverStart: handleGuideHoverStart,
+    onHoverEnd: handleGuideHoverEnd,
+  }), [spanById, displayedIndexById, renderedStart, renderedEnd, remPx, nameColumnWidth, hoveredGuideIds, handleGuideHoverStart, handleGuideHoverEnd]);
+
+  // Scroll selected span into view when selection changes
+  useEffect(() => {
+    if (!selectedSpanId) { return; }
+    const index = displayedIndexByIdRef.current.get(selectedSpanId);
+    if (index !== undefined) { scrollToIndex(index, listHeaderRef.current?.offsetHeight ?? 0); }
+  }, [selectedSpanId, scrollToIndex]);
 
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -238,52 +313,66 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
           return;
         }
       }
+      const spansShown = displayedSpansRef.current;
+      const currentIndex = displayedIndexByIdRef.current.get(effectiveSelectedRef.current ?? '') ?? -1;
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
-        setSelectedSpanId(() => {
-          const current = effectiveSelectedRef.current;
-          const idx = displayedSpansRef.current.findIndex((s) => s.spanId === current);
-          // BUG-017: when idx === -1 (span not in displayed list), start from first item
-          const safeIdx = idx === -1 ? 0 : idx;
-          const next = displayedSpansRef.current[safeIdx + 1] ?? displayedSpansRef.current[safeIdx];
-          return next ? next.spanId : current;
-        });
+        // BUG-017: when the selected span is not in the displayed list, start from first item
+        const safeIdx = currentIndex === -1 ? 0 : currentIndex;
+        const next = spansShown[safeIdx + 1] ?? spansShown[safeIdx];
+        if (next) { selectSpan(next.spanId); }
       } else if (e.key === 'ArrowUp' || e.key === 'k') {
         e.preventDefault();
-        setSelectedSpanId(() => {
-          const current = effectiveSelectedRef.current;
-          const idx = displayedSpansRef.current.findIndex((s) => s.spanId === current);
-          // BUG-017: when idx === -1, wrap to last item
-          const safeIdx = idx === -1 ? displayedSpansRef.current.length - 1 : idx;
-          const next = displayedSpansRef.current[safeIdx - 1] ?? displayedSpansRef.current[safeIdx];
-          return next ? next.spanId : current;
-        });
+        // BUG-017: when the selected span is not in the displayed list, wrap to last item
+        const safeIdx = currentIndex === -1 ? spansShown.length - 1 : currentIndex;
+        const next = spansShown[safeIdx - 1] ?? spansShown[safeIdx];
+        if (next) { selectSpan(next.spanId); }
       } else if (e.key === 'Escape') {
         // BUG-077: set dismissed flag so firstLlmSpan auto-fill is suppressed
         setSelectedSpanId(null);
         setUserDismissedDetail(true);
+      } else if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+        // Same keys as Grafana's trace view.
+        const actions = collapseActionsRef.current;
+        if (e.key === ']') { actions.collapseAll(); }
+        else if (e.key === '[') { actions.expandAll(); }
+        else if (e.key === 'p') { actions.collapseOne(); }
+        else if (e.key === 'o') { actions.expandOne(); }
       }
     };
     // Use capture phase so Grafana's own keyboard-shortcut listeners (which may call
     // stopPropagation during bubbling) cannot swallow our events before we see them.
     document.addEventListener('keydown', onKeyDown, true);
     return () => document.removeEventListener('keydown', onKeyDown, true);
-  }, []);
+  }, [selectSpan]);
 
-  const selectedSpan = flatSpans.find((s) => s.spanId === effectiveSelectedSpanId) || null;
+  const selectedSpan = (effectiveSelectedSpanId !== null && spanById.get(effectiveSelectedSpanId)) || null;
 
   // Auto-select first LLM span if nothing selected.
   // BUG-001 follow-up: prefer non-GUARDRAIL LLM spans (guardrails are secondary/audit spans);
   // fall back to any LLM span (including GUARDRAIL) if no non-guardrail LLM spans exist.
-  const firstLlmSpan = flatSpans.find((s) => isLlmSpan(s.tags) && !isGuardrailSpan(s.tags))
-    ?? flatSpans.find((s) => isLlmSpan(s.tags));
+  const firstLlmSpan = useMemo(
+    () => flatSpans.find((s) => isLlmSpan(s.tags) && !isGuardrailSpan(s.tags)) ?? flatSpans.find((s) => isLlmSpan(s.tags)),
+    [flatSpans]
+  );
 
-  // BUG-007: explicitly call setSelectedSpanId for auto-selection so it shows in state
+  // BUG-007: explicitly select for auto-selection so it shows in state
   useEffect(() => {
     if (selectedSpanId === null && !userDismissedDetail && firstLlmSpan) {
-      setSelectedSpanId(firstLlmSpan.spanId);
+      selectSpan(firstLlmSpan.spanId);
     }
-  }, [selectedSpanId, userDismissedDetail, firstLlmSpan]);
+  }, [selectedSpanId, userDismissedDetail, firstLlmSpan, selectSpan]);
+
+  const iconButtonStyle: React.CSSProperties = {
+    padding: `${theme.spacing(0.25)} ${theme.spacing(0.5)}`,
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    color: theme.colors.text.secondary,
+    fontSize: '10px',
+    display: 'flex',
+    alignItems: 'center',
+  };
 
   // Track the actually-displayed span for keyboard navigation
   effectiveSelectedRef.current = (selectedSpan ?? firstLlmSpan)?.spanId ?? null;
@@ -459,108 +548,114 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
             <div
               className={styles.spanListPane}
               data-testid="span-list-pane"
+              ref={setPaneElement}
               style={{
                 width: detailPaneOpen ? spanListWidth : '100%',
                 minWidth: detailPaneOpen ? SPAN_LIST_MIN_WIDTH : undefined,
                 maxWidth: detailPaneOpen ? `calc(100% - ${SPAN_DETAIL_RESERVED_WIDTH}px)` : undefined,
-              }}
+                '--llt-name-column': nameColumnFraction,
+              } as React.CSSProperties}
             >
-              <div className={styles.columnHeader}>
-                <span className={styles.colName}>Span</span>
-                <span className={styles.colDuration}>Duration</span>
-                <span className={styles.colBar}>Timeline</span>
-                <button
-                  onClick={handleExpandAll}
-                  title="Expand all spans"
-                  aria-label="Expand all spans"
-                  style={{
-                    marginLeft: theme.spacing(0.5),
-                    padding: `${theme.spacing(0.25)} ${theme.spacing(0.5)}`,
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    color: theme.colors.text.secondary,
-                    fontSize: '10px',
-                    display: 'flex',
-                    alignItems: 'center',
-                  }}
-                >
-                  <Icon name="angle-double-down" size="xs" />
-                </button>
-                <button
-                  onClick={handleCollapseAll}
-                  title="Collapse all spans"
-                  aria-label="Collapse all spans"
-                  style={{
-                    padding: `${theme.spacing(0.25)} ${theme.spacing(0.5)}`,
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    color: theme.colors.text.secondary,
-                    fontSize: '10px',
-                    display: 'flex',
-                    alignItems: 'center',
-                  }}
-                >
-                  <Icon name="angle-double-up" size="xs" />
-                </button>
-                <button
-                  onClick={() => setAiOnly((v) => !v)}
-                  title="Show only AI spans"
-                  aria-label="Filter AI spans only"
-                  aria-pressed={aiOnly}
-                  style={{
-                    marginLeft: theme.spacing(1),
-                    padding: `${theme.spacing(0.25)} ${theme.spacing(0.75)}`,
-                    borderRadius: '10px',
-                    border: aiOnly ? 'none' : `1px solid ${theme.colors.border.medium}`,
-                    background: aiOnly ? theme.colors.primary.main : 'none',
-                    color: aiOnly ? '#fff' : theme.colors.text.secondary,
-                    fontSize: '10px',
-                    fontWeight: theme.typography.fontWeightMedium,
-                    cursor: 'pointer',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.05em',
-                    lineHeight: 1.4,
-                  }}
-                >
-                  AI only
-                </button>
-                <div style={{ marginLeft: 'auto', display: 'flex', gap: theme.spacing(0.5) }}>
+              <div className={styles.listHeader} ref={listHeaderRef}>
+                <div className={styles.toolbar}>
                   <button
-                    onClick={() => setListPaneOpen(false)}
-                    title="Collapse span list"
-                    aria-label="Collapse span list"
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      cursor: 'pointer',
-                      color: theme.colors.text.secondary,
-                      display: 'flex',
-                      alignItems: 'center',
-                      padding: theme.spacing(0.25),
-                      borderRadius: theme.shape.radius.default,
-                    }}
+                    onClick={handleExpandOne}
+                    title="Expand +1"
+                    aria-label="Expand +1"
+                    style={iconButtonStyle}
                   >
-                    <Icon name="angle-left" size="sm" />
+                    <Icon name="angle-down" size="xs" />
                   </button>
                   <button
-                    onClick={() => setDetailPaneOpen((v) => !v)}
-                    title={detailPaneOpen ? 'Collapse detail panel' : 'Expand detail panel'}
-                    aria-label={detailPaneOpen ? 'Collapse detail panel' : 'Expand detail panel'}
+                    onClick={handleCollapseOne}
+                    title="Collapse +1"
+                    aria-label="Collapse +1"
+                    style={iconButtonStyle}
+                  >
+                    <Icon name="angle-up" size="xs" />
+                  </button>
+                  <button
+                    onClick={handleExpandAll}
+                    title="Expand all spans"
+                    aria-label="Expand all spans"
+                    style={iconButtonStyle}
+                  >
+                    <Icon name="angle-double-down" size="xs" />
+                  </button>
+                  <button
+                    onClick={handleCollapseAll}
+                    title="Collapse all spans"
+                    aria-label="Collapse all spans"
+                    style={iconButtonStyle}
+                  >
+                    <Icon name="angle-double-up" size="xs" />
+                  </button>
+                  <button
+                    onClick={() => setAiOnly((v) => !v)}
+                    title="Show only AI spans"
+                    aria-label="Filter AI spans only"
+                    aria-pressed={aiOnly}
                     style={{
-                      background: 'none',
-                      border: 'none',
+                      marginLeft: theme.spacing(1),
+                      padding: `${theme.spacing(0.25)} ${theme.spacing(0.75)}`,
+                      borderRadius: '10px',
+                      border: aiOnly ? 'none' : `1px solid ${theme.colors.border.medium}`,
+                      background: aiOnly ? theme.colors.primary.main : 'none',
+                      color: aiOnly ? '#fff' : theme.colors.text.secondary,
+                      fontSize: '10px',
+                      fontWeight: theme.typography.fontWeightMedium,
                       cursor: 'pointer',
-                      color: theme.colors.text.secondary,
-                      display: 'flex',
-                      alignItems: 'center',
-                      padding: theme.spacing(0.25),
-                      borderRadius: theme.shape.radius.default,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.05em',
+                      lineHeight: 1.4,
                     }}
                   >
-                    <Icon name={detailPaneOpen ? 'angle-right' : 'angle-left'} size="sm" />
+                    AI only
                   </button>
+                  <div style={{ marginLeft: 'auto', display: 'flex', gap: theme.spacing(0.5) }}>
+                    <button
+                      onClick={() => setListPaneOpen(false)}
+                      title="Collapse span list"
+                      aria-label="Collapse span list"
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        cursor: 'pointer',
+                        color: theme.colors.text.secondary,
+                        display: 'flex',
+                        alignItems: 'center',
+                        padding: theme.spacing(0.25),
+                        borderRadius: theme.shape.radius.default,
+                      }}
+                    >
+                      <Icon name="angle-left" size="sm" />
+                    </button>
+                    <button
+                      onClick={() => setDetailPaneOpen((v) => !v)}
+                      title={detailPaneOpen ? 'Collapse detail panel' : 'Expand detail panel'}
+                      aria-label={detailPaneOpen ? 'Collapse detail panel' : 'Expand detail panel'}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        cursor: 'pointer',
+                        color: theme.colors.text.secondary,
+                        display: 'flex',
+                        alignItems: 'center',
+                        padding: theme.spacing(0.25),
+                        borderRadius: theme.shape.radius.default,
+                      }}
+                    >
+                      <Icon name={detailPaneOpen ? 'angle-right' : 'angle-left'} size="sm" />
+                    </button>
+                  </div>
+                </div>
+                <div className={styles.columnHeader} ref={columnHeaderRef}>
+                  <div className={styles.colNameCell} data-testid="span-list-name-header" ref={setNameHeaderElement}>
+                    <span className={styles.colName}>Span</span>
+                    <NameColumnResizer rowRef={columnHeaderRef} scrollElement={paneElement} onChange={handleNameColumnResize} />
+                  </div>
+                  <span className={styles.colDuration}>Duration</span>
+                  <span className={styles.colBar}>Timeline</span>
                 </div>
               </div>
               {/* Span filter input */}
@@ -607,26 +702,33 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
                 </div>
               )}
 
-              {/* BUG-006: compute min depth among AI-only spans for relative depth display */}
-              {(() => {
-                const minAiDepth = aiOnly && displayedSpans.length > 0
-                  ? Math.min(...displayedSpans.map((s) => s.depth ?? 0))
-                  : 0;
-                return displayedSpans.map((span, i) => (
-                  // BUG-024: include array index in key to avoid duplicate spanId collisions
-                  <SpanRow
-                    key={span.spanId + '-' + i}
-                    span={span}
-                    isSelected={span.spanId === effectiveSelectedSpanId}
-                    isExpanded={!collapsed.has(span.spanId)}
-                    onToggleExpand={handleToggleExpand}
-                    onClick={handleSelectSpan}
-                    traceStartMs={traceStartMs}
-                    traceDurationMs={traceDurationMs}
-                    displayDepth={aiOnly ? (span.depth ?? 0) - minAiDepth : undefined}
-                  />
-                ));
-              })()}
+              {/* Only the rows near the viewport are in the DOM; the list is as tall as all rows together. */}
+              <div
+                className={styles.spanList}
+                ref={setListElement}
+                style={{ height: displayedSpans.length * SPAN_ROW_HEIGHT }}
+                onMouseLeave={() => setHoveredGuideIds((prev) => (prev.size === 0 ? prev : new Set()))}
+              >
+                {displayedSpans.slice(renderedStart, renderedEnd + 1).map((span, offset) => {
+                  const i = renderedStart + offset;
+                  return (
+                    // BUG-024: include array index in key to avoid duplicate spanId collisions
+                    <SpanRow
+                      key={span.spanId + '-' + i}
+                      span={span}
+                      top={i * SPAN_ROW_HEIGHT}
+                      isSelected={span.spanId === effectiveSelectedSpanId}
+                      isExpanded={!collapsed.has(span.spanId)}
+                      onToggleExpand={handleToggleExpand}
+                      onClick={handleSelectSpan}
+                      traceStartMs={traceStartMs}
+                      traceDurationMs={traceDurationMs}
+                      displayDepth={aiOnly ? (span.depth ?? 0) - minAiDepth : undefined}
+                      guideContext={guideContext}
+                    />
+                  );
+                })}
+              </div>
             </div>
           )}
 
@@ -652,7 +754,7 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
           {detailPaneOpen && (
             <div className={styles.detailPane} data-testid="span-detail-pane">
               {/* BUG-011: if selectedSpanId is set but not visible, show a collapsed indicator */}
-              {selectedSpanId && !displayedSpans.some((s) => s.spanId === selectedSpanId) ? (
+              {selectedSpanId && !displayedIndexById.has(selectedSpanId) ? (
                 <div className={styles.detailPlaceholder} data-testid="span-collapsed-message">
                   <Icon name="eye-slash" size="xl" />
                   <span>Selected span is collapsed.</span>

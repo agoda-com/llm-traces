@@ -5,6 +5,7 @@ import {
   flattenTree,
   getTraceDurationMs,
   getTraceStartMs,
+  parseOtlpTrace,
   type PluginSpan,
 } from '../src/utils/tempoClient.ts';
 
@@ -236,6 +237,40 @@ describe('BUG-048: self-referencing span is treated as a root (not infinite recu
   assertEquals(flat.length, 1, 'BUG-048: self-referencing span results in single root span');
   assertEquals(flat[0].spanId, 'self', 'BUG-048: self-referencing span has correct spanId');
   assertEquals(flat[0].children.length, 0, 'BUG-048: self-referencing span has no children after fix');
+});
+
+// ---------------------------------------------------------------------------
+// Deep traces: tree building and walking must not recurse once per level
+// ---------------------------------------------------------------------------
+
+describe('5,000-level chain', () => {
+  const depth = 5000;
+  const nanos = (ms: number) => String(BigInt(1_700_000_000_000 + ms) * 1_000_000n);
+  const otlp = {
+    resourceSpans: [{
+      resource: { attributes: [{ key: 'service.name', value: { stringValue: 'deep-service' } }] },
+      scopeSpans: [{
+        spans: Array.from({ length: depth }, (_, i) => ({
+          traceId: 'deep',
+          spanId: `s${i}`,
+          parentSpanId: i === 0 ? '' : `s${i - 1}`,
+          name: `step ${i}`,
+          startTimeUnixNano: nanos(i),
+          endTimeUnixNano: nanos(i + depth - i + 1),
+          attributes: [],
+        })),
+      }],
+    }],
+  };
+
+  const roots = parseOtlpTrace(otlp);
+  assertEquals(roots.length, 1, 'parseOtlpTrace builds a single root');
+  const flat = flattenTree(roots);
+  assertEquals(flat.length, depth, 'flattenTree returns every span');
+  assertEquals(flat[depth - 1].depth, depth - 1, 'the deepest span has depth 4999');
+  assertEquals(flat[depth - 1].spanId, `s${depth - 1}`, 'the deepest span comes last in pre-order');
+  assertEquals(getTraceStartMs(roots), 1_700_000_000_000, 'getTraceStartMs walks the whole chain');
+  assertEquals(getTraceDurationMs(roots), depth + 1, 'getTraceDurationMs walks the whole chain');
 });
 
 // ---------------------------------------------------------------------------

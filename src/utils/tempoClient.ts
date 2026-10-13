@@ -137,7 +137,7 @@ function safeBigIntMs(nanoStr: string | undefined): number {
   }
 }
 
-function parseOtlpTrace(data: unknown): PluginSpan[] {
+export function parseOtlpTrace(data: unknown): PluginSpan[] {
   const flatSpans: PluginSpan[] = [];
 
   // Normalise the many possible top-level shapes into a single resourceSpans array.
@@ -245,38 +245,49 @@ function buildTree(spans: PluginSpan[]): PluginSpan[] {
       roots.push(s);
     }
   }
-  assignDepth(roots, 0);
+  assignDepth(roots);
   sortByStartTime(roots);
   return roots;
 }
 
-function sortByStartTime(spans: PluginSpan[]): void {
-  spans.sort((a, b) => a.startTimeMs - b.startTimeMs);
-  // BUG-015 fix: recurse into ANY span with children, not just those with >1 child.
-  for (const s of spans) {
-    if (s.children.length > 0) {
-      sortByStartTime(s.children);
+// The tree walks below are iterative: a trace can be thousands of levels deep, which overflows the call stack
+// when recursing once per level.
+function sortByStartTime(roots: PluginSpan[]): void {
+  const pending: PluginSpan[][] = [roots];
+  for (let siblings = pending.pop(); siblings; siblings = pending.pop()) {
+    siblings.sort((a, b) => a.startTimeMs - b.startTimeMs);
+    // BUG-015 fix: descend into ANY span with children, not just those with >1 child.
+    for (const s of siblings) {
+      if (s.children.length > 0) {
+        pending.push(s.children);
+      }
     }
   }
 }
 
-function assignDepth(spans: PluginSpan[], depth: number) {
-  for (const s of spans) {
-    s.depth = depth;
-    assignDepth(s.children, depth + 1);
+function assignDepth(roots: PluginSpan[]): void {
+  const pending: Array<{ siblings: PluginSpan[]; depth: number }> = [{ siblings: roots, depth: 0 }];
+  for (let item = pending.pop(); item; item = pending.pop()) {
+    for (const s of item.siblings) {
+      s.depth = item.depth;
+      if (s.children.length > 0) {
+        pending.push({ siblings: s.children, depth: item.depth + 1 });
+      }
+    }
   }
 }
 
 export function flattenTree(roots: PluginSpan[]): PluginSpan[] {
   const result: PluginSpan[] = [];
-  function visit(span: PluginSpan) {
-    result.push(span);
-    for (const child of span.children) {
-      visit(child);
-    }
+  const pending: PluginSpan[] = [];
+  for (let i = roots.length - 1; i >= 0; i--) {
+    pending.push(roots[i]);
   }
-  for (const root of roots) {
-    visit(root);
+  for (let span = pending.pop(); span; span = pending.pop()) {
+    result.push(span);
+    for (let i = span.children.length - 1; i >= 0; i--) {
+      pending.push(span.children[i]);
+    }
   }
   return result;
 }

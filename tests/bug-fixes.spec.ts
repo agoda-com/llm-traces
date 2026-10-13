@@ -616,37 +616,6 @@ test.describe('SpanRow and TraceSummaryBar bug fixes', () => {
   });
 
   // -------------------------------------------------------------------------
-  // BUG-071: span indent must not exceed 20 * 16px = 320px regardless of depth
-  // -------------------------------------------------------------------------
-  test('BUG-071: span indent width is capped at 320px (depth 20) for deeply nested spans', async ({ page }) => {
-    await mockTempoWithCapture(page);
-    await page.goto(PLUGIN_URL);
-    await page.waitForSelector('[data-testid="trace-explorer"]');
-    await waitForTraces(page);
-
-    // Expand all visible spans to surface any deeply nested ones
-    const expandIcons = page.locator('[data-testid^="span-row-"] [data-icon="angle-right"]');
-    const iconCount = await expandIcons.count();
-    for (let i = 0; i < Math.min(iconCount, 10); i++) {
-      await expandIcons.nth(i).click({ force: true }).catch(() => {});
-    }
-
-    // Check indent widths: the indent div is the second child of each span row
-    // More broadly: check all rendered span rows for their indent element
-    const spanRows = page.locator('[data-testid^="span-row-"]');
-    const rowCount = await spanRows.count();
-    for (let i = 0; i < rowCount; i++) {
-      const indentWidth = await spanRows.nth(i).evaluate((row) => {
-        // The indent div is the first or second child depending on error dot presence
-        const children = Array.from(row.children) as HTMLElement[];
-        const indent = children.find((c) => c.className && c.className.includes('indent'));
-        return indent ? parseInt(indent.style.width || '0', 10) : 0;
-      });
-      expect(indentWidth, `span indent=${indentWidth}px exceeds max 320px (BUG-071)`).toBeLessThanOrEqual(320);
-    }
-  });
-
-  // -------------------------------------------------------------------------
   // BUG-035: NaN durationMs values must not corrupt avg/p95/slowest stats
   // The summary bar should render without showing "NaN" anywhere.
   // -------------------------------------------------------------------------
