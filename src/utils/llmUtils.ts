@@ -49,10 +49,17 @@ export interface LlmToolDefinition {
   isValid: boolean;
 }
 
+// Input tokens include the cached ones and output tokens include reasoning and audio, as the
+// OTel GenAI conventions define them. The detail counts are the parts of those totals.
 export interface LlmTokenUsage {
   input?: number;
   output?: number;
   total?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  reasoning?: number;
+  audioInput?: number;
+  audioOutput?: number;
 }
 
 export interface LlmInvocationParams {
@@ -153,6 +160,74 @@ function getNumAttr(tags: KeyValuePair[], key: string): number | undefined {
   if (typeof tag.value === 'string' && tag.value.trim() === '') return undefined;
   const n = Number(tag.value);
   return isNaN(n) ? undefined : n;
+}
+
+const USAGE_PREFIXES = ['gen_ai.usage.', 'llm.token_count.'];
+
+// Each token detail has several spellings across instrumentations (OTel GenAI, OpenInference, OpenLLMetry,
+// LiteLLM, AI SDK). The first spelling present wins, in this order.
+const USAGE_DETAIL_SUFFIXES: Record<'cacheRead' | 'cacheWrite' | 'reasoning' | 'audioInput' | 'audioOutput', string[]> = {
+  cacheRead: [
+    'cache_read.input_tokens',
+    'cache_read_input_tokens',
+    'cache_read_tokens',
+    'details.cache_read_tokens',
+    'details.cache_read_input_tokens',
+    'prompt_details.cache_read',
+    'input_cached_tokens',
+  ],
+  cacheWrite: [
+    'cache_creation.input_tokens',
+    'cache_write.input_tokens',
+    'cache_creation_input_tokens',
+    'cache_write_tokens',
+    'details.cache_write_tokens',
+    'details.cache_creation_input_tokens',
+    'prompt_details.cache_write',
+    'input_cache_creation',
+  ],
+  reasoning: ['reasoning.output_tokens', 'completion_details.reasoning'],
+  audioInput: ['audio.input_tokens', 'prompt_details.audio'],
+  audioOutput: ['audio.output_tokens', 'completion_details.audio'],
+};
+const AI_SDK_USAGE_DETAIL_KEYS: Partial<Record<keyof typeof USAGE_DETAIL_SUFFIXES, string[]>> = {
+  cacheRead: ['ai.usage.cachedInputTokens'],
+  reasoning: ['ai.usage.reasoningTokens'],
+};
+
+function usageDetailKeys(detail: keyof typeof USAGE_DETAIL_SUFFIXES): string[] {
+  return [
+    ...USAGE_DETAIL_SUFFIXES[detail].flatMap((suffix) => USAGE_PREFIXES.map((prefix) => prefix + suffix)),
+    ...(AI_SDK_USAGE_DETAIL_KEYS[detail] ?? []),
+  ];
+}
+
+function extractTokenDetails(tags: KeyValuePair[]): Omit<LlmTokenUsage, 'input' | 'output' | 'total'> {
+  const details: Omit<LlmTokenUsage, 'input' | 'output' | 'total'> = {};
+  for (const detail of Object.keys(USAGE_DETAIL_SUFFIXES) as Array<keyof typeof USAGE_DETAIL_SUFFIXES>) {
+    for (const key of usageDetailKeys(detail)) {
+      const value = getNumAttr(tags, key);
+      if (value !== undefined) {
+        details[detail] = value;
+        break;
+      }
+    }
+  }
+  return details;
+}
+
+// Costs the instrumentation reported itself, in USD: gen_ai.cost.total_cost, then gen_ai.usage.cost and
+// OpenInference's llm.cost.total.
+const REPORTED_COST_KEYS = ['gen_ai.cost.total_cost', 'gen_ai.usage.cost', 'llm.cost.total'];
+
+function getReportedCost(tags: KeyValuePair[]): number | undefined {
+  for (const key of REPORTED_COST_KEYS) {
+    const value = getNumAttr(tags, key);
+    if (value !== undefined) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function looksLikeMessages(value: string): boolean {
@@ -1029,7 +1104,7 @@ function extractOpenInference(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSp
   const finishReason = getAttr(tags, 'llm.output_messages.0.message.finish_reason')
     ?? getAttr(tags, 'output.finish_reason')
     ?? getAttr(tags, 'llm.stop_reason');
-  const precomputedCostUsd = getNumAttr(tags, 'gen_ai.cost.total_cost');
+  const precomputedCostUsd = getReportedCost(tags);
   return {
     convention: 'openinference',
     spanKind,
@@ -1042,11 +1117,27 @@ function extractOpenInference(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSp
       input: getNumAttr(tags, 'llm.token_count.prompt') ?? getNumAttr(tags, 'gen_ai.usage.input_tokens') ?? getNumAttr(tags, 'llm.usage.prompt_tokens'),
       output: getNumAttr(tags, 'llm.token_count.completion') ?? getNumAttr(tags, 'gen_ai.usage.output_tokens') ?? getNumAttr(tags, 'llm.usage.completion_tokens'),
       total: getNumAttr(tags, 'llm.token_count.total') ?? getNumAttr(tags, 'gen_ai.usage.total_tokens') ?? getNumAttr(tags, 'llm.usage.total_tokens'),
+      ...extractTokenDetails(tags),
     },
     invocationParams,
     finishReason,
     ...(precomputedCostUsd !== undefined ? { precomputedCostUsd } : {}),
   };
+}
+
+// Request parameters that have a named field in the parameter list above.
+const NAMED_REQUEST_PARAMS = new Set(['model', 'temperature', 'max_tokens', 'top_p', 'top_k', 'frequency_penalty', 'presence_penalty']);
+
+// Every other gen_ai.request.* attribute (seed, stop_sequences, choice.count, ...) is shown under its own name.
+function extractOtherRequestParams(tags: KeyValuePair[]): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  for (const tag of tags) {
+    const name = tag.key.startsWith('gen_ai.request.') ? tag.key.slice('gen_ai.request.'.length) : '';
+    if (name && !NAMED_REQUEST_PARAMS.has(name) && tag.value !== undefined && tag.value !== null && tag.value !== '') {
+      params[name] = tag.value;
+    }
+  }
+  return params;
 }
 
 function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanData, 'isLlm'> {
@@ -1108,7 +1199,7 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
     ?? finishReasonFromArray
     ?? getAttr(tags, 'gen_ai.finish_reason')
     ?? fromEvents.finishReason;
-  const precomputedCostUsd = getNumAttr(tags, 'gen_ai.cost.total_cost');
+  const precomputedCostUsd = getReportedCost(tags);
   const attributeTools = extractOtelToolDefinitions(tags);
   const tools = attributeTools.length > 0 ? attributeTools : fromEvents.tools.length > 0 ? fromEvents.tools : toolSpan?.tools ?? [];
   return {
@@ -1122,6 +1213,7 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
       input: getNumAttr(tags, 'gen_ai.usage.input_tokens') ?? getNumAttr(tags, 'gen_ai.usage.prompt_tokens'),
       output: getNumAttr(tags, 'gen_ai.usage.output_tokens') ?? getNumAttr(tags, 'gen_ai.usage.completion_tokens'),
       total: getNumAttr(tags, 'gen_ai.usage.total_tokens'),
+      ...extractTokenDetails(tags),
     },
     invocationParams: {
       temperature: getNumAttr(tags, 'gen_ai.request.temperature'),
@@ -1142,6 +1234,7 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
       ...(getAttr(tags, 'gen_ai.operation.name') !== undefined
         ? { operationName: getAttr(tags, 'gen_ai.operation.name') }
         : {}),
+      ...extractOtherRequestParams(tags),
     },
     finishReason,
     ...(precomputedCostUsd !== undefined ? { precomputedCostUsd } : {}),
@@ -1179,7 +1272,7 @@ function extractGeneric(tags: KeyValuePair[], logs: SpanLog[], operationName?: s
     outputMessages = fromEvents.output;
   }
   const finishReason = getAttr(tags, 'finish_reason') ?? getAttr(tags, 'stop_reason');
-  const precomputedCostUsd = getNumAttr(tags, 'gen_ai.cost.total_cost');
+  const precomputedCostUsd = getReportedCost(tags);
   return {
     convention: 'generic',
     model,
@@ -1190,6 +1283,7 @@ function extractGeneric(tags: KeyValuePair[], logs: SpanLog[], operationName?: s
       input: getNumAttr(tags, 'gen_ai.usage.input_tokens') ?? getNumAttr(tags, 'llm.token_count.prompt') ?? getNumAttr(tags, 'prompt_tokens'),
       output: getNumAttr(tags, 'gen_ai.usage.output_tokens') ?? getNumAttr(tags, 'llm.token_count.completion') ?? getNumAttr(tags, 'completion_tokens'),
       total: getNumAttr(tags, 'gen_ai.usage.total_tokens') ?? getNumAttr(tags, 'llm.token_count.total') ?? getNumAttr(tags, 'total_tokens'),
+      ...extractTokenDetails(tags),
     },
     invocationParams: {
       temperature: getNumAttr(tags, 'gen_ai.request.temperature') ?? getNumAttr(tags, 'temperature'),
@@ -1224,6 +1318,7 @@ function applyFrameworkSpan(data: Omit<LlmSpanData, 'isLlm'>, span: FrameworkSpa
     outputMessages: data.outputMessages.length > 0 ? data.outputMessages : span.output !== undefined ? extractMessagesFromValue(span.output) : toolMessages?.output ?? [],
     tools: data.tools.length > 0 ? data.tools : toolDefinitionsFromValue(span.tools),
     tokenUsage: {
+      ...data.tokenUsage,
       input: data.tokenUsage.input ?? span.usage?.input,
       output: data.tokenUsage.output ?? span.usage?.output,
       total: data.tokenUsage.total ?? span.usage?.total,
@@ -1233,11 +1328,18 @@ function applyFrameworkSpan(data: Omit<LlmSpanData, 'isLlm'>, span: FrameworkSpa
   };
 }
 
+// Agent spans of the AI SDK and other agent frameworks carry the usage and cost of every model call
+// below them (invoke_agent, agent_step).
+function isAggregateOperation(tags: KeyValuePair[]): boolean {
+  const operation = getAttr(tags, 'gen_ai.operation.name')?.toLowerCase();
+  return operation === 'invoke_agent' || operation === 'agent_step';
+}
+
 // A span that repeats what its children already report is not a model call of its own:
 // counting it would double the trace totals.
 function isModelCall(tags: KeyValuePair[], framework: LlmFramework | undefined): boolean {
   const kind = getSpanKind(tags);
-  return kind !== 'TOOL' && !(framework === 'vercel-ai' && kind === 'CHAIN');
+  return kind !== 'TOOL' && !isAggregateOperation(tags) && !(framework === 'vercel-ai' && kind === 'CHAIN');
 }
 
 export function extractLlmSpanData(tags: KeyValuePair[], logs: SpanLog[], operationName?: string, scope?: SpanScope): LlmSpanData {
@@ -1383,6 +1485,11 @@ export function getLlmDisplayAttributeKeys(
     }
   }
 
+  for (const detail of Object.keys(USAGE_DETAIL_SUFFIXES) as Array<keyof typeof USAGE_DETAIL_SUFFIXES>) {
+    if (data.tokenUsage[detail] !== undefined) {
+      addExact(...usageDetailKeys(detail));
+    }
+  }
   if (data.tokenUsage.input !== undefined) {
     addExact('llm.token_count.prompt', 'gen_ai.usage.input_tokens', 'gen_ai.usage.prompt_tokens', 'llm.usage.prompt_tokens', 'prompt_tokens');
   }
@@ -1421,7 +1528,10 @@ export function getLlmDisplayAttributeKeys(
     );
   }
   if (data.precomputedCostUsd !== undefined) {
-    addExact('gen_ai.cost.total_cost');
+    addExact(...REPORTED_COST_KEYS);
+  }
+  if (data.convention === 'otel-genai' && Object.keys(data.invocationParams).length > 0) {
+    addPrefixes('gen_ai.request.');
   }
 
   const openInferenceKind = data.spanKind?.toUpperCase();
@@ -1511,7 +1621,7 @@ export function isLlmSpan(tags: KeyValuePair[]): boolean {
     const kind = String(oiKind.value).toUpperCase();
     return kind === 'LLM' || kind === 'GUARDRAIL';
   }
-  if (getSpanKind(tags) === 'TOOL') {
+  if (getSpanKind(tags) === 'TOOL' || isAggregateOperation(tags)) {
     return false;
   }
   const vercelAiKind = getVercelAiKind(tags);

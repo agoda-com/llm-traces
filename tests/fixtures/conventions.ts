@@ -322,3 +322,77 @@ export const VERCEL_AI_TRACE = buildTrace(CONVENTION_TRACE_ID, { name: 'ai', ver
     },
   },
 ]);
+
+// ---------------------------------------------------------------------------
+// Area 5: token details, cost and aggregate agent spans
+// ---------------------------------------------------------------------------
+
+export const TOKEN_DETAILS_TRACE = buildTrace(CONVENTION_TRACE_ID, { name: 'example.genai', version: '1.0.0' }, [
+  {
+    spanId: 'usagespan000001',
+    name: 'invoke_agent assistant',
+    startMs: 0,
+    endMs: 3000,
+    attributes: {
+      'gen_ai.operation.name': 'invoke_agent',
+      'gen_ai.agent.name': 'assistant',
+      'gen_ai.request.model': 'claude-sonnet-4-5',
+      'gen_ai.usage.input_tokens': 9000,
+      'gen_ai.usage.output_tokens': 999,
+      'gen_ai.usage.total_tokens': 9999,
+      'gen_ai.usage.cost': 5,
+    },
+  },
+  {
+    spanId: 'usagespan000002',
+    parentSpanId: 'usagespan000001',
+    name: 'chat claude-sonnet-4-5',
+    startMs: 100,
+    endMs: 900,
+    attributes: {
+      'gen_ai.operation.name': 'chat',
+      'gen_ai.system': 'anthropic',
+      'gen_ai.request.model': 'claude-sonnet-4-5',
+      'gen_ai.request.seed': 42,
+      'gen_ai.usage.input_tokens': 1000,
+      'gen_ai.usage.output_tokens': 100,
+      'gen_ai.usage.total_tokens': 1100,
+      'gen_ai.usage.cache_read.input_tokens': 600,
+      'gen_ai.usage.cache_write.input_tokens': 200,
+      'gen_ai.usage.reasoning.output_tokens': 30,
+      'gen_ai.usage.audio.output_tokens': 5,
+    },
+  },
+  {
+    spanId: 'usagespan000003',
+    parentSpanId: 'usagespan000001',
+    name: 'chat model-x',
+    startMs: 1000,
+    endMs: 1500,
+    attributes: {
+      'gen_ai.operation.name': 'chat',
+      'gen_ai.system': 'example',
+      'gen_ai.request.model': 'model-x',
+      'gen_ai.usage.input_tokens': 400,
+      'gen_ai.usage.output_tokens': 50,
+      'gen_ai.usage.total_tokens': 450,
+      'gen_ai.usage.cost': 0.042,
+    },
+  },
+  {
+    spanId: 'usagespan000004',
+    parentSpanId: 'usagespan000001',
+    name: 'chat gemini-2.0-flash',
+    startMs: 1600,
+    endMs: 2000,
+    attributes: {
+      'gen_ai.operation.name': 'chat',
+      'gen_ai.system': 'gcp.gemini',
+      'gen_ai.request.model': 'gemini-2.0-flash',
+      'gen_ai.usage.input_tokens': 1000,
+      'gen_ai.usage.output_tokens': 100,
+      'gen_ai.usage.total_tokens': 1100,
+      'gen_ai.usage.cache_read.input_tokens': 500,
+    },
+  },
+]);

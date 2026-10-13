@@ -4,7 +4,7 @@ import { useStyles2, Icon } from '@grafana/ui';
 import { getStyles } from './LlmSpanDetail.styles';
 import { CopyButton, ToolCallCard, ToolCatalog, ToolResultCard } from './ToolVisualization';
 import { KeyValuePair, LlmFramework, LlmMessage, LlmMessagePart, LlmSpanData, LlmTokenUsage, LlmInvocationParams, LlmToolCall, LlmToolDefinition, getSpanKindColor, getSpanKind, isOpenInferenceSpan, decodeUnicodeEscapes } from '../utils/llmUtils';
-import { estimateCost, formatCost } from '../utils/costUtils';
+import { estimateCostDetailed, formatCost } from '../utils/costUtils';
 import { formatAttributeValue } from '../utils/formatUtils';
 
 function estimateTokenCount(text: string): number {
@@ -301,10 +301,20 @@ function indexToolCalls(messages: LlmMessage[]): ReadonlyMap<string, LlmToolCall
   return calls;
 }
 
+// Parts of the input and output totals, shown next to the totals they belong to.
+const TOKEN_DETAIL_ITEMS: Array<{ key: 'cacheRead' | 'cacheWrite' | 'audioInput' | 'reasoning' | 'audioOutput'; label: string; testId: string }> = [
+  { key: 'cacheRead', label: 'Cache read', testId: 'token-cache-read' },
+  { key: 'cacheWrite', label: 'Cache write', testId: 'token-cache-write' },
+  { key: 'audioInput', label: 'Audio in', testId: 'token-audio-input' },
+  { key: 'reasoning', label: 'Reasoning', testId: 'token-reasoning' },
+  { key: 'audioOutput', label: 'Audio out', testId: 'token-audio-output' },
+];
+
 function TokenUsageDisplay({ usage, model, precomputedCostUsd }: { usage: LlmTokenUsage; model: string; precomputedCostUsd?: number }) {
   const styles = useStyles2(getStyles);
   const hasAny = usage.input !== undefined || usage.output !== undefined || usage.total !== undefined;
   if (!hasAny) { return null; }
+  const tokenDetails = TOKEN_DETAIL_ITEMS.filter(({ key }) => usage[key] !== undefined);
   return (
     <div className={styles.tokenRow}>
       {usage.input !== undefined && (
@@ -313,12 +323,24 @@ function TokenUsageDisplay({ usage, model, precomputedCostUsd }: { usage: LlmTok
           <span className={styles.tokenValue}>{usage.input.toLocaleString()}</span>
         </div>
       )}
+      {tokenDetails.filter(({ key }) => key === 'cacheRead' || key === 'cacheWrite' || key === 'audioInput').map(({ key, label, testId }) => (
+        <div className={styles.tokenItem} key={key} data-testid={testId}>
+          <span className={styles.tokenLabel}>{label}:</span>
+          <span className={styles.tokenValue}>{usage[key]?.toLocaleString()}</span>
+        </div>
+      ))}
       {usage.output !== undefined && (
         <div className={styles.tokenItem}>
           <span className={styles.tokenLabel}>Output:</span>
           <span className={styles.tokenValue}>{usage.output.toLocaleString()}</span>
         </div>
       )}
+      {tokenDetails.filter(({ key }) => key === 'reasoning' || key === 'audioOutput').map(({ key, label, testId }) => (
+        <div className={styles.tokenItem} key={key} data-testid={testId}>
+          <span className={styles.tokenLabel}>{label}:</span>
+          <span className={styles.tokenValue}>{usage[key]?.toLocaleString()}</span>
+        </div>
+      ))}
       {usage.total !== undefined && (
         <div className={styles.tokenItem}>
           <span className={styles.tokenLabel}>Total:</span>
@@ -334,13 +356,17 @@ function TokenUsageDisplay({ usage, model, precomputedCostUsd }: { usage: LlmTok
             </div>
           );
         }
-        const cost = estimateCost(model, usage.input, usage.output);
+        const cost = estimateCostDetailed(model, usage);
         return (
           <div className={styles.tokenItem}>
             <span className={styles.tokenLabel}>Est. Cost:</span>
-            <span className={styles.tokenValue}>
+            <span
+              className={styles.tokenValue}
+              data-testid="estimated-cost"
+              title={cost?.approximate ? 'Cached tokens are priced at the input rate because the built-in price table has no cache price for this model.' : undefined}
+            >
               {cost !== undefined
-                ? formatCost(cost)
+                ? `${cost.approximate ? '~' : ''}${formatCost(cost.usd)}`
                 : <span style={{ opacity: 0.5, fontStyle: 'italic' }}>unknown</span>
               }
             </span>

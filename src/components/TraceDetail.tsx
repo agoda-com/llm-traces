@@ -180,7 +180,7 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
           costUsd += llmData.precomputedCostUsd;
           precomputedCount++;
         } else if (llmData.model && llmData.tokenUsage.input != null) {
-          const cost = estimateCost(llmData.model, llmData.tokenUsage.input, llmData.tokenUsage.output);
+          const cost = estimateCost(llmData.model, llmData.tokenUsage.input, llmData.tokenUsage.output, llmData.tokenUsage);
           if (cost !== undefined) {
             costUsd += cost;
             estimatedCount++;

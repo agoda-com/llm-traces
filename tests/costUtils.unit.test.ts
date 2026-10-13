@@ -1,7 +1,7 @@
 // Unit tests for costUtils.ts
 // Run with: node --experimental-strip-types tests/costUtils.unit.test.ts
 
-import { estimateCost, formatCost } from '../src/utils/costUtils.ts';
+import { estimateCost, estimateCostDetailed, formatCost } from '../src/utils/costUtils.ts';
 
 // ---------------------------------------------------------------------------
 // Minimal assertion helpers
@@ -171,6 +171,50 @@ describe('BUG-010: formatCost negative values', () => {
   assertEquals(formatCost(0), '$0', 'formatCost(0) still returns "$0"');
   assertEquals(formatCost(5), '$5.00', 'formatCost(5) still returns "$5.00"');
   assertEquals(formatCost(0.05), '$0.050', 'formatCost(0.05) still returns "$0.050"');
+});
+
+// ---------------------------------------------------------------------------
+// Cache-aware pricing
+// ---------------------------------------------------------------------------
+
+describe('estimateCostDetailed - cached tokens are priced once', () => {
+  // claude-sonnet-4-5: input 3, output 15, cache read 0.3, cache write 3.75 (USD per 1M tokens).
+  // Input tokens include the cached ones: 1000 = 200 uncached + 600 read + 200 written.
+  const cached = estimateCostDetailed('claude-sonnet-4-5', { input: 1000, output: 100, cacheRead: 600, cacheWrite: 200 });
+  const expected = (200 * 3 + 600 * 0.3 + 200 * 3.75 + 100 * 15) / 1_000_000;
+  assert(cached !== undefined && Math.abs(cached.usd - expected) < 1e-12, 'uncached input, cache read, cache write and output are each priced once');
+  assertEquals(cached?.approximate, false, 'exact when the table has both cache prices');
+
+  const uncachedOnly = estimateCostDetailed('claude-sonnet-4-5', { input: 1000, output: 100 });
+  assert(uncachedOnly !== undefined && Math.abs(uncachedOnly.usd - (1000 * 3 + 100 * 15) / 1_000_000) < 1e-12, 'without cache tokens the price is input times rate plus output times rate');
+  assertEquals(uncachedOnly?.approximate, false, 'nothing is approximate without cache tokens');
+
+  const openAi = estimateCostDetailed('gpt-4o', { input: 1000, output: 0, cacheRead: 400 });
+  assert(openAi !== undefined && Math.abs(openAi.usd - (600 * 2.5 + 400 * 1.25) / 1_000_000) < 1e-12, 'OpenAI cached input uses the cache read price');
+  assertEquals(openAi?.approximate, false, 'a read price is enough when only reads are present');
+});
+
+describe('estimateCostDetailed - models without cache prices', () => {
+  // gemini-2.0-flash has no cache price in the table: cached tokens are priced at the input rate.
+  const result = estimateCostDetailed('gemini-2.0-flash', { input: 1000, output: 100, cacheRead: 500 });
+  assert(result !== undefined && Math.abs(result.usd - (1000 * 0.1 + 100 * 0.4) / 1_000_000) < 1e-12, 'cache read is priced at the input rate, so the total equals the plain price');
+  assertEquals(result?.approximate, true, 'marked as an estimate');
+
+  const writeOnly = estimateCostDetailed('gpt-4o', { input: 1000, output: 0, cacheWrite: 300 });
+  assertEquals(writeOnly?.approximate, true, 'cache writes without a write price are an estimate');
+});
+
+describe('estimateCostDetailed - edge cases', () => {
+  const overlap = estimateCostDetailed('claude-sonnet-4-5', { input: 100, output: 0, cacheRead: 500 });
+  assert(overlap !== undefined && Math.abs(overlap.usd - (500 * 0.3) / 1_000_000) < 1e-12, 'uncached input never goes negative when the cache counts exceed the input');
+  assertEquals(estimateCostDetailed('no-such-model', { input: 10, output: 10 }), undefined, 'unknown model');
+  assertEquals(estimateCostDetailed('gpt-4o', {}), undefined, 'no tokens');
+});
+
+describe('estimateCost - cache aware and backward compatible', () => {
+  assertEquals(estimateCost('gpt-4o', 1000, 100), (1000 * 2.5 + 100 * 10) / 1_000_000, 'two-argument form is unchanged');
+  const withCache = estimateCost('gpt-4o', 1000, 100, { cacheRead: 400 });
+  assert(withCache !== undefined && Math.abs(withCache - (600 * 2.5 + 400 * 1.25 + 100 * 10) / 1_000_000) < 1e-12, 'optional cache argument');
 });
 
 // ---------------------------------------------------------------------------

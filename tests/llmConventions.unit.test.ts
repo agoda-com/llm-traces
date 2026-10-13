@@ -488,6 +488,145 @@ describe('Vercel AI SDK 7 uses GenAI attributes under the ai scope', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Area 5: token details, cost attributes, request parameters, aggregate agent spans
+// ---------------------------------------------------------------------------
+
+describe('GenAI semconv token details', () => {
+  const tags = [
+    kv('gen_ai.operation.name', 'chat'),
+    kv('gen_ai.request.model', 'model-a'),
+    kv('gen_ai.usage.input_tokens', 300),
+    kv('gen_ai.usage.output_tokens', 50),
+    kv('gen_ai.usage.cache_read.input_tokens', 100),
+    kv('gen_ai.usage.cache_write.input_tokens', 20),
+    kv('gen_ai.usage.reasoning.output_tokens', 30),
+    kv('gen_ai.usage.audio.input_tokens', 7),
+    kv('gen_ai.usage.audio.output_tokens', 5),
+  ];
+  const usage = extractLlmSpanData(tags, []).tokenUsage;
+  assertEquals(usage.input, 300, 'input tokens stay the reported total');
+  assertEquals(usage.cacheRead, 100, 'cache read');
+  assertEquals(usage.cacheWrite, 20, 'cache write');
+  assertEquals(usage.reasoning, 30, 'reasoning');
+  assertEquals(usage.audioInput, 7, 'audio input');
+  assertEquals(usage.audioOutput, 5, 'audio output');
+  const keys = getLlmDisplayAttributeKeys(tags, extractLlmSpanData(tags, []));
+  assert(keys.has('gen_ai.usage.cache_read.input_tokens') && keys.has('gen_ai.usage.reasoning.output_tokens') && keys.has('gen_ai.usage.audio.output_tokens'), 'token detail attributes are promoted out of the raw list');
+});
+
+describe('token detail key variants', () => {
+  const cacheRead = ['cache_read.input_tokens', 'cache_read_input_tokens', 'cache_read_tokens', 'details.cache_read_tokens', 'details.cache_read_input_tokens', 'prompt_details.cache_read', 'input_cached_tokens'];
+  const cacheWrite = ['cache_creation.input_tokens', 'cache_write.input_tokens', 'cache_creation_input_tokens', 'cache_write_tokens', 'details.cache_write_tokens', 'details.cache_creation_input_tokens', 'prompt_details.cache_write', 'input_cache_creation'];
+  for (const prefix of ['gen_ai.usage.', 'llm.token_count.']) {
+    for (const suffix of cacheRead) {
+      const usage = extractLlmSpanData([kv('gen_ai.operation.name', 'chat'), kv(`${prefix}${suffix}`, 11)], []).tokenUsage;
+      assertEquals(usage.cacheRead, 11, `${prefix}${suffix} is cache read`);
+    }
+    for (const suffix of cacheWrite) {
+      const usage = extractLlmSpanData([kv('gen_ai.operation.name', 'chat'), kv(`${prefix}${suffix}`, 12)], []).tokenUsage;
+      assertEquals(usage.cacheWrite, 12, `${prefix}${suffix} is cache write`);
+    }
+    const reasoning = extractLlmSpanData([kv('gen_ai.operation.name', 'chat'), kv(`${prefix}reasoning.output_tokens`, 9)], []).tokenUsage;
+    assertEquals(reasoning.reasoning, 9, `${prefix}reasoning.output_tokens`);
+  }
+  const reasoningDetails = extractLlmSpanData([kv('gen_ai.operation.name', 'chat'), kv('gen_ai.usage.completion_details.reasoning', 4), kv('gen_ai.usage.completion_details.audio', 3)], []).tokenUsage;
+  assertEquals(reasoningDetails.reasoning, 4, 'completion_details.reasoning');
+  assertEquals(reasoningDetails.audioOutput, 3, 'completion_details.audio');
+});
+
+describe('OpenInference token details', () => {
+  const tags = [
+    kv('openinference.span.kind', 'LLM'),
+    kv('llm.model_name', 'model-a'),
+    kv('llm.token_count.prompt', 500),
+    kv('llm.token_count.completion', 80),
+    kv('llm.token_count.total', 580),
+    kv('llm.token_count.prompt_details.cache_read', 200),
+    kv('llm.token_count.prompt_details.cache_write', 50),
+    kv('llm.token_count.prompt_details.audio', 6),
+    kv('llm.token_count.completion_details.reasoning', 40),
+    kv('llm.token_count.completion_details.audio', 8),
+  ];
+  const result = extractLlmSpanData(tags, []);
+  assertEquals(result.tokenUsage.cacheRead, 200, 'prompt_details.cache_read');
+  assertEquals(result.tokenUsage.cacheWrite, 50, 'prompt_details.cache_write');
+  assertEquals(result.tokenUsage.audioInput, 6, 'prompt_details.audio');
+  assertEquals(result.tokenUsage.reasoning, 40, 'completion_details.reasoning');
+  assertEquals(result.tokenUsage.audioOutput, 8, 'completion_details.audio');
+  assertEquals(result.tokenUsage.input, 500, 'prompt tokens unchanged');
+  const keys = getLlmDisplayAttributeKeys(tags, result);
+  assert(keys.has('llm.token_count.prompt_details.cache_read') && keys.has('llm.token_count.completion_details.reasoning'), 'OpenInference token details are promoted');
+});
+
+describe('AI SDK token details', () => {
+  const tags = [
+    kv('ai.operationId', 'ai.generateText.doGenerate'),
+    kv('ai.model.id', 'model-a'),
+    kv('ai.usage.inputTokens', 100),
+    kv('ai.usage.outputTokens', 20),
+    kv('ai.usage.cachedInputTokens', 60),
+    kv('ai.usage.reasoningTokens', 7),
+  ];
+  const result = extractLlmSpanData(tags, []);
+  assertEquals(result.tokenUsage.cacheRead, 60, 'ai.usage.cachedInputTokens');
+  assertEquals(result.tokenUsage.reasoning, 7, 'ai.usage.reasoningTokens');
+  assert(getLlmDisplayAttributeKeys(tags, result).has('ai.usage.cachedInputTokens'), 'ai.usage.* is promoted');
+});
+
+describe('cost attributes', () => {
+  const base = [kv('gen_ai.operation.name', 'chat'), kv('gen_ai.request.model', 'model-a')];
+  assertEquals(extractLlmSpanData([...base, kv('gen_ai.usage.cost', 0.0123)], []).precomputedCostUsd, 0.0123, 'gen_ai.usage.cost');
+  assertEquals(extractLlmSpanData([...base, kv('llm.cost.total', 0.5)], []).precomputedCostUsd, 0.5, 'llm.cost.total');
+  assertEquals(extractLlmSpanData([...base, kv('gen_ai.cost.total_cost', 0.02), kv('gen_ai.usage.cost', 9)], []).precomputedCostUsd, 0.02, 'gen_ai.cost.total_cost keeps priority');
+  assertEquals(extractLlmSpanData([kv('openinference.span.kind', 'LLM'), kv('llm.model_name', 'm'), kv('llm.cost.total', 0.25)], []).precomputedCostUsd, 0.25, 'llm.cost.total on OpenInference spans');
+  assertEquals(extractLlmSpanData([...base], []).precomputedCostUsd, undefined, 'no cost attribute, no reported cost');
+  const keys = getLlmDisplayAttributeKeys([...base, kv('llm.cost.total', 0.5)], extractLlmSpanData([...base, kv('llm.cost.total', 0.5)], []));
+  assert(keys.has('llm.cost.total'), 'cost attribute is promoted');
+});
+
+describe('all gen_ai.request.* keys are parameters', () => {
+  const tags = [
+    kv('gen_ai.operation.name', 'chat'),
+    kv('gen_ai.request.model', 'model-a'),
+    kv('gen_ai.request.temperature', 0.2),
+    kv('gen_ai.request.seed', 42),
+    kv('gen_ai.request.stop_sequences', ['END', 'STOP']),
+    kv('gen_ai.request.choice.count', 2),
+    kv('gen_ai.request.reasoning.level', 'high'),
+  ];
+  const params = extractLlmSpanData(tags, []).invocationParams as Record<string, unknown>;
+  assertEquals(params.temperature, 0.2, 'known keys keep their names');
+  assertEquals(params.seed, 42, 'seed');
+  assertDeepEquals(params.stop_sequences, ['END', 'STOP'], 'stop_sequences');
+  assertEquals(params['choice.count'], 2, 'choice.count');
+  assertEquals(params['reasoning.level'], 'high', 'reasoning.level');
+  assert(!('model' in params), 'the model is not a parameter');
+  const keys = getLlmDisplayAttributeKeys(tags, extractLlmSpanData(tags, []));
+  assert(keys.has('gen_ai.request.seed') && keys.has('gen_ai.request.stop_sequences'), 'request attributes are promoted');
+});
+
+describe('aggregate agent spans are not model calls', () => {
+  const invokeAgent = [
+    kv('gen_ai.operation.name', 'invoke_agent'),
+    kv('gen_ai.request.model', 'model-a'),
+    kv('gen_ai.usage.input_tokens', 500),
+    kv('gen_ai.usage.output_tokens', 100),
+    kv('gen_ai.usage.cost', 0.4),
+  ];
+  const agent = extractLlmSpanData(invokeAgent, []);
+  assertEquals(agent.isLlm, false, 'invoke_agent is not counted in trace totals');
+  assertEquals(agent.model, 'model-a', 'the agent span still shows its model');
+  assertEquals(agent.tokenUsage.input, 500, 'and its usage');
+  assertEquals(extractLlmSpanData([kv('gen_ai.operation.name', 'agent_step'), kv('gen_ai.usage.input_tokens', 1)], []).isLlm, false, 'agent_step is not counted');
+  assertEquals(extractLlmSpanData([kv('gen_ai.operation.name', 'chat'), kv('gen_ai.usage.input_tokens', 1)], []).isLlm, true, 'the chat call is counted');
+  assert(!isLlmSpan(invokeAgent), 'invoke_agent is not an LLM span');
+  assert(isLlmSpan([kv('gen_ai.operation.name', 'chat'), kv('gen_ai.request.model', 'm')]), 'chat is an LLM span');
+  const openInferenceAgent = extractLlmSpanData([kv('openinference.span.kind', 'LLM'), kv('gen_ai.operation.name', 'invoke_agent'), kv('llm.model_name', 'm')], []);
+  assertEquals(openInferenceAgent.isLlm, true, 'only the GenAI operation name marks a span as aggregate, not OpenInference spans');
+  assertEquals(extractLlmSpanData([kv('gen_ai.operation.name', 'create_agent'), kv('gen_ai.usage.input_tokens', 1)], []).isLlm, true, 'create_agent is unaffected');
+});
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 

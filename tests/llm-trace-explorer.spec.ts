@@ -1,7 +1,7 @@
 import { test, expect, Page } from '@playwright/test';
 import { SEARCH_RESPONSE, TRACE_RESPONSE, VERTEX_TRACE_RESPONSE, OTEL_GENAI_TRACE_RESPONSE, GENERIC_TRACE_RESPONSE, STRUCTURED_SEARCH_RESPONSE, STRUCTURED_TRACE_RESPONSE } from './fixtures/llm-trace';
 import { waitForToolbarLayout } from './waitForToolbarLayout';
-import { CONVENTION_SEARCH_RESPONSE, GENAI_EVENTS_TRACE, GENAI_TOOL_TRACE, STRUCTURED_ATTRIBUTES_TRACE, VERCEL_AI_TRACE } from './fixtures/conventions';
+import { CONVENTION_SEARCH_RESPONSE, GENAI_EVENTS_TRACE, GENAI_TOOL_TRACE, STRUCTURED_ATTRIBUTES_TRACE, VERCEL_AI_TRACE, TOKEN_DETAILS_TRACE } from './fixtures/conventions';
 
 const PLUGIN_URL = '/a/agoda-llmtraces-app';
 async function mockTempoApis(page: Page) {
@@ -1638,5 +1638,42 @@ test.describe('Vercel AI SDK', () => {
     // Model calls: 90+15 and 90+25 tokens. The wrapper repeats 180+40 and is not counted.
     await expect(page.getByTestId('trace-stats-row')).toContainText('220');
     await expect(page.getByTestId('trace-stats-row')).not.toContainText('440');
+  });
+});
+
+test.describe('Token details, cost and aggregate agent spans', () => {
+  test('cache, reasoning and audio tokens are shown and cached input is priced once', async ({ page }) => {
+    await openConventionTrace(page, TOKEN_DETAILS_TRACE, 'usagespan000002');
+    const params = page.getByTestId('params-section');
+    await expect(params.getByTestId('token-cache-read')).toContainText('600');
+    await expect(params.getByTestId('token-cache-write')).toContainText('200');
+    await expect(params.getByTestId('token-reasoning')).toContainText('30');
+    await expect(params.getByTestId('token-audio-output')).toContainText('5');
+    // 200 uncached x $3 + 600 read x $0.30 + 200 written x $3.75 + 100 output x $15, per million tokens.
+    await expect(params.getByTestId('estimated-cost')).toHaveText('$0.0030');
+    await expect(params).toContainText('seed');
+  });
+
+  test('a model without cache prices marks the cost as an estimate', async ({ page }) => {
+    await openConventionTrace(page, TOKEN_DETAILS_TRACE, 'usagespan000004');
+    const cost = page.getByTestId('params-section').getByTestId('estimated-cost');
+    await expect(cost).toHaveText('~$0.0001');
+    await expect(cost).toHaveAttribute('title', /priced at the input rate/);
+  });
+
+  test('a reported cost is shown as reported', async ({ page }) => {
+    await openConventionTrace(page, TOKEN_DETAILS_TRACE, 'usagespan000003');
+    await expect(page.getByTestId('params-section')).toContainText('Reported Cost');
+    await expect(page.getByTestId('params-section')).toContainText('$0.042');
+  });
+
+  test('the agent span is shown but its aggregate usage is left out of the trace totals', async ({ page }) => {
+    await openConventionTrace(page, TOKEN_DETAILS_TRACE, 'usagespan000001');
+    await expect(page.getByTestId('params-section')).toContainText('9,999');
+    const stats = page.getByTestId('trace-stats-row');
+    await expect(stats).toContainText('2,650');
+    await expect(stats).not.toContainText('9,999');
+    await expect(stats.getByTestId('llm-span-count')).toHaveText('3');
+    await expect(stats).toContainText('~$0.045');
   });
 });
