@@ -366,6 +366,7 @@ export const SpanRow = memo(function SpanRow({ span, top, isSelected, isExpanded
       style={{ top }}
       onClick={() => onClick(span)}
       data-testid={`span-row-${span.spanId}`}
+      aria-current={isSelected ? 'true' : undefined}
       role="button"
       tabIndex={0}
       onKeyDown={(e) => e.key === 'Enter' && onClick(span)}

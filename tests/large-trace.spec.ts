@@ -109,6 +109,71 @@ test.describe('30,000-span trace list', () => {
     await expect(page.getByTestId(`span-row-${spanIdFor('lg', 12_000)}`)).toBeVisible();
   });
 
+  test.describe('with the agent graph', () => {
+    const inPane = async (page: Page, spanId: string) => {
+      const pane = (await page.getByTestId('span-list-pane').boundingBox())!;
+      const box = await page.getByTestId(`span-row-${spanId}`).boundingBox();
+      return !!box && box.y >= pane.y && box.y + box.height <= pane.y + pane.height + 1;
+    };
+
+    test('draws only the nodes near the visible area and keeps only the rows near the viewport in the DOM', async ({ page }) => {
+      await openLargeTrace(page);
+      const rowsBefore = await page.locator('[data-testid^="span-row-"]').count();
+      const started = Date.now();
+      await page.getByTestId('graph-toggle').click();
+      await expect(page.getByTestId('agent-graph-node').first()).toBeVisible({ timeout: 60_000 });
+      const toggleMs = Date.now() - started;
+
+      // A node near the left edge: the tool node whose span the detail panel does not show yet.
+      const node = page.getByTestId('agent-graph-node').filter({ hasText: /^operation \d+/ }).first();
+      const label = (await node.getAttribute('aria-label'))!.split(',')[0];
+      const clicked = Date.now();
+      await node.click();
+      await expect(page.getByTestId('span-header-raw-name')).toContainText(label);
+      const nodeClickToDetailMs = Date.now() - clicked;
+
+      const graphNodes = await page.getByTestId('agent-graph-node').count();
+      const paneNodes = await page.getByTestId('span-list-pane').evaluate((pane) => pane.getElementsByTagName('*').length);
+      const columnNodes = await page.getByTestId('span-list-column').evaluate((column) => column.getElementsByTagName('*').length);
+      console.log(`PERF graph on 30000 spans: graphToggleToFirstNodeMs=${toggleMs} nodeClickToDetailMs=${nodeClickToDetailMs} nodesInDom=${graphNodes} ` +
+        `spanListDomNodes=${paneNodes} listColumnDomNodes=${columnNodes} rowsBefore=${rowsBefore}`);
+      expect(graphNodes, 'a graph of thousands of nodes draws a few hundred at most').toBeLessThan(400);
+      expect(await page.locator('[data-testid^="span-row-"]').count()).toBeLessThan(200);
+      expect(paneNodes).toBeLessThan(6000);
+      expect(await page.getByTestId('span-list-pane').evaluate((pane) => pane.scrollHeight)).toBeGreaterThan(30_000 * 36);
+    });
+
+    test('scrolling the graph draws the nodes that come into view', async ({ page }) => {
+      await openLargeTrace(page);
+      await page.getByTestId('graph-toggle').click();
+      await expect(page.getByTestId('agent-graph-node').first()).toBeVisible({ timeout: 60_000 });
+      const idsBefore = await page.getByTestId('agent-graph-node').evaluateAll((nodes) => nodes.map((n) => (n as HTMLElement).dataset.nodeId));
+      await page.getByTestId('agent-graph').evaluate((graph) => { graph.scrollLeft = graph.scrollWidth / 2; });
+      await expect.poll(async () => {
+        const ids = await page.getByTestId('agent-graph-node').evaluateAll((nodes) => nodes.map((n) => (n as HTMLElement).dataset.nodeId));
+        return ids.length > 0 && ids.every((id) => !idsBefore.includes(id));
+      }).toBe(true);
+    });
+
+    test('the list shows the selected row after the graph takes half of its height, and the keys still move the selection', async ({ page }) => {
+      await openLargeTrace(page, [12_000]);
+      const target = spanIdFor('lg', 12_000);
+      await expect.poll(() => inPane(page, target)).toBe(true);
+      await page.getByTestId('graph-toggle').click();
+      await expect(page.getByTestId('agent-graph')).toBeVisible();
+      await expect.poll(() => inPane(page, target), { message: 'the selected row is still in view' }).toBe(true);
+      expect(await page.locator('[data-testid^="span-row-"]').count()).toBeLessThan(200);
+
+      for (let i = 0; i < 40; i++) { await page.keyboard.press('j'); }
+      await expect(page.getByTestId('span-detail-pane')).toContainText('operation 12040');
+      await expect.poll(() => inPane(page, spanIdFor('lg', 12_040))).toBe(true);
+
+      await page.getByTestId('graph-toggle').click();
+      await expect(page.getByTestId('agent-graph')).toHaveCount(0);
+      await expect.poll(() => inPane(page, spanIdFor('lg', 12_040))).toBe(true);
+    });
+  });
+
   test('clicking a row selects it', async ({ page }) => {
     await openLargeTrace(page);
     const first = page.locator('[data-testid^="span-row-"]').nth(8);

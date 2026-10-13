@@ -3,7 +3,7 @@ import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useR
 import { useResize } from '../utils/useResize';
 
 import { useStyles2, useTheme2, Alert, Button, Icon } from '@grafana/ui';
-import { getStyles, SPAN_DETAIL_RESERVED_WIDTH, SPAN_LIST_MIN_WIDTH } from './TraceDetail.styles';
+import { getStyles, GRAPH_COLUMN_MIN_WIDTH, GRAPH_PANE_MIN_HEIGHT, SPAN_DETAIL_RESERVED_WIDTH, SPAN_LIST_MIN_WIDTH } from './TraceDetail.styles';
 
 import { PluginSpan, flattenTree, getTraceDurationMs, getTraceStartMs } from '../utils/tempoClient';
 import { isLlmSpan, isGuardrailSpan, isAiSpan, extractLlmSpanData, getSpanDisplayName } from '../utils/llmUtils';
@@ -12,9 +12,13 @@ import { formatDuration } from '../utils/formatUtils';
 import { clampNameColumnFraction, loadNameColumnFraction, saveNameColumnFraction } from '../utils/nameColumn';
 import { collapseOneLevel, expandOneLevel, getParentSpanIds, getSpanAgents, getVisibleSpans, indexSpans, revealSpan } from '../utils/traceTree';
 import { getAgentColors } from '../utils/agentColors';
+import { getAgentGraph } from '../utils/agentGraph';
+import { loadGraphSplit, saveGraphSplit } from '../utils/graphSplit';
 import { useVirtualList } from '../utils/useVirtualList';
 import { AgentLayer, GuideContext, NAME_MIN_WIDTH, SPAN_ROW_HEIGHT, SpanRow } from './SpanRow';
 import { SpanDetailPanel } from './SpanDetailPanel';
+import { AgentGraph } from './AgentGraph';
+import { PaneDivider } from './PaneDivider';
 import { NameColumnResizer } from './NameColumnResizer';
 
 interface TraceDetailViewProps {
@@ -34,14 +38,20 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [aiOnly, setAiOnly] = useState(false);
+  const [graphView, setGraphView] = useState(false);
   const [spanFilter, setSpanFilter] = useState('');
   const [detailPaneOpen, setDetailPaneOpen] = useState(true);
   const [listPaneOpen, setListPaneOpen] = useState(true);
   // BUG-077: flag set by Escape to prevent auto-re-selection via firstLlmSpan
   const [userDismissedDetail, setUserDismissedDetail] = useState(false);
-  const { width: spanListWidth, onMouseDown: onSpanListResize } = useResize(500, SPAN_LIST_MIN_WIDTH, 900);
+  const { width: spanListWidth, setWidth: setSpanListWidth, onMouseDown: onSpanListResize } = useResize(500, SPAN_LIST_MIN_WIDTH, 900);
+  const widthBeforeGraphRef = useRef<number | null>(null);
   const [nameColumnFraction, setNameColumnFraction] = useState(loadNameColumnFraction);
+  const [graphSplit, setGraphSplit] = useState(loadGraphSplit);
+  // Counts the node clicks, so that clicking the selected node again still scrolls the tree back to its span.
+  const [graphClicks, setGraphClicks] = useState(0);
   const [hoveredGuideIds, setHoveredGuideIds] = useState<Set<string>>(() => new Set());
+  const [columnElement, setColumnElement] = useState<HTMLDivElement | null>(null);
   const [paneElement, setPaneElement] = useState<HTMLDivElement | null>(null);
   const [listElement, setListElement] = useState<HTMLDivElement | null>(null);
   const [nameHeaderElement, setNameHeaderElement] = useState<HTMLDivElement | null>(null);
@@ -60,14 +70,20 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
     setSelectedSpanId(null);
     setCollapsed(new Set());
     setAiOnly(false);
+    setGraphView(false);
+    if (widthBeforeGraphRef.current !== null) {
+      setSpanListWidth(widthBeforeGraphRef.current);
+      widthBeforeGraphRef.current = null;
+    }
     setSpanFilter('');
     setUserDismissedDetail(false);
-  }, [traceId, openCount]);
+  }, [traceId, openCount, setSpanListWidth]);
 
   const flatSpans = useMemo(() => spans ? flattenTree(spans) : [], [spans]);
   const spanById = useMemo(() => indexSpans(flatSpans), [flatSpans]);
   spanByIdRef.current = spanById;
   const spanAgents = useMemo(() => spans ? getSpanAgents(spans) : new Map(), [spans]);
+  const agentGraph = useMemo(() => (graphView && spans ? getAgentGraph(spans) : null), [graphView, spans]);
   const agentColors = useMemo(() => getAgentColors(theme), [theme]);
   const agentLayer = useMemo<AgentLayer>(() => ({ byId: spanAgents, colors: agentColors }), [spanAgents, agentColors]);
 
@@ -124,6 +140,30 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
     selectSpan(span.spanId);
   }, [selectSpan]);
 
+  // The list column is widened while the graph is shown, and gets the width the reader chose back when it is hidden.
+  const toggleGraph = useCallback(() => {
+    if (!graphView) {
+      widthBeforeGraphRef.current = spanListWidth;
+      setSpanListWidth(Math.max(spanListWidth, GRAPH_COLUMN_MIN_WIDTH));
+    } else if (widthBeforeGraphRef.current !== null) {
+      setSpanListWidth(widthBeforeGraphRef.current);
+      widthBeforeGraphRef.current = null;
+    }
+    setGraphView(!graphView);
+  }, [graphView, spanListWidth, setSpanListWidth]);
+
+  // A node can hold a span that the filters hide, so the click clears the filters that would hide it.
+  const handleSelectGraphSpan = useCallback((spanId: string) => {
+    const span = spanByIdRef.current.get(spanId);
+    if (span && !isAiSpan(span.tags)) {
+      setAiOnly(false);
+    }
+    setSpanFilter('');
+    setUserDismissedDetail(false);
+    selectSpan(spanId);
+    setGraphClicks((clicks) => clicks + 1);
+  }, [selectSpan]);
+
   const handleGuideHoverStart = useCallback((ancestorId: string) => {
     setHoveredGuideIds((prev) => (prev.has(ancestorId) ? prev : new Set(prev).add(ancestorId)));
   }, []);
@@ -144,6 +184,11 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
     const clamped = clampNameColumnFraction(fraction);
     setNameColumnFraction(clamped);
     saveNameColumnFraction(clamped);
+  }, []);
+
+  const handleGraphSplitCommit = useCallback((fraction: number) => {
+    setGraphSplit(fraction);
+    saveGraphSplit(fraction);
   }, []);
 
   // Derive trace display name from the root span (no parent) when the prop-passed rootName is blank.
@@ -270,12 +315,12 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
     onHoverEnd: handleGuideHoverEnd,
   }), [spanById, displayedIndexById, renderedStart, renderedEnd, remPx, nameColumnWidth, hoveredGuideIds, handleGuideHoverStart, handleGuideHoverEnd]);
 
-  // Scroll selected span into view when selection changes
+  // Scroll selected span into view when selection changes, when the graph resizes the list, and on every node click
   useEffect(() => {
     if (!selectedSpanId) { return; }
     const index = displayedIndexByIdRef.current.get(selectedSpanId);
     if (index !== undefined) { scrollToIndex(index, listHeaderRef.current?.offsetHeight ?? 0); }
-  }, [selectedSpanId, scrollToIndex]);
+  }, [selectedSpanId, scrollToIndex, graphView, graphClicks]);
 
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -304,6 +349,10 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
       // Don't intercept when focus is in a text input anywhere on the page
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+        return;
+      }
+      // The arrow keys move the divider between the span tree and the graph.
+      if (target.getAttribute?.('role') === 'separator') {
         return;
       }
       // BUG-026: skip events whose target is outside our container and also not
@@ -551,183 +600,212 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
         <div className={styles.body}>
           {listPaneOpen && (
             <div
-              className={styles.spanListPane}
-              data-testid="span-list-pane"
-              ref={setPaneElement}
+              className={styles.spanListColumn}
+              data-testid="span-list-column"
+              ref={setColumnElement}
               style={{
                 width: detailPaneOpen ? spanListWidth : '100%',
                 minWidth: detailPaneOpen ? SPAN_LIST_MIN_WIDTH : undefined,
                 maxWidth: detailPaneOpen ? `calc(100% - ${SPAN_DETAIL_RESERVED_WIDTH}px)` : undefined,
-                '--llt-name-column': nameColumnFraction,
-              } as React.CSSProperties}
+              }}
             >
-              <div className={styles.listHeader} ref={listHeaderRef}>
-                <div className={styles.toolbar}>
-                  <div className={styles.toolbarToggles}>
-                    {/* The icon is in Grafana's icon index from 11.3 on, like those of KindIcon. */}
-                    <Button
-                      size="sm"
-                      icon="ai"
-                      variant={aiOnly ? 'primary' : 'secondary'}
-                      fill={aiOnly ? 'solid' : 'outline'}
-                      aria-pressed={aiOnly}
-                      title="Show only AI spans"
-                      data-testid="ai-only-toggle"
-                      onClick={() => setAiOnly((v) => !v)}
-                    >
-                      AI only
-                    </Button>
-                  </div>
-                  <button
-                    onClick={handleExpandOne}
-                    title="Expand +1"
-                    aria-label="Expand +1"
-                    style={iconButtonStyle}
-                  >
-                    <Icon name="angle-down" size="xs" />
-                  </button>
-                  <button
-                    onClick={handleCollapseOne}
-                    title="Collapse +1"
-                    aria-label="Collapse +1"
-                    style={iconButtonStyle}
-                  >
-                    <Icon name="angle-up" size="xs" />
-                  </button>
-                  <button
-                    onClick={handleExpandAll}
-                    title="Expand all spans"
-                    aria-label="Expand all spans"
-                    style={iconButtonStyle}
-                  >
-                    <Icon name="angle-double-down" size="xs" />
-                  </button>
-                  <button
-                    onClick={handleCollapseAll}
-                    title="Collapse all spans"
-                    aria-label="Collapse all spans"
-                    style={iconButtonStyle}
-                  >
-                    <Icon name="angle-double-up" size="xs" />
-                  </button>
-                  <div style={{ marginLeft: 'auto', display: 'flex', gap: theme.spacing(0.5) }}>
-                    <button
-                      onClick={() => setListPaneOpen(false)}
-                      title="Collapse span list"
-                      aria-label="Collapse span list"
-                      style={{
-                        background: 'none',
-                        border: 'none',
-                        cursor: 'pointer',
-                        color: theme.colors.text.secondary,
-                        display: 'flex',
-                        alignItems: 'center',
-                        padding: theme.spacing(0.25),
-                        borderRadius: theme.shape.radius.default,
-                      }}
-                    >
-                      <Icon name="angle-left" size="sm" />
-                    </button>
-                    <button
-                      onClick={() => setDetailPaneOpen((v) => !v)}
-                      title={detailPaneOpen ? 'Collapse detail panel' : 'Expand detail panel'}
-                      aria-label={detailPaneOpen ? 'Collapse detail panel' : 'Expand detail panel'}
-                      style={{
-                        background: 'none',
-                        border: 'none',
-                        cursor: 'pointer',
-                        color: theme.colors.text.secondary,
-                        display: 'flex',
-                        alignItems: 'center',
-                        padding: theme.spacing(0.25),
-                        borderRadius: theme.shape.radius.default,
-                      }}
-                    >
-                      <Icon name={detailPaneOpen ? 'angle-right' : 'angle-left'} size="sm" />
-                    </button>
-                  </div>
-                </div>
-                <div className={styles.columnHeader} ref={columnHeaderRef}>
-                  <div className={styles.colNameCell} data-testid="span-list-name-header" ref={setNameHeaderElement}>
-                    <span className={styles.colName}>Span</span>
-                    <NameColumnResizer rowRef={columnHeaderRef} scrollElement={paneElement} onChange={handleNameColumnResize} />
-                  </div>
-                  <span className={styles.colDuration}>Duration</span>
-                  <span className={styles.colBar}>Timeline</span>
-                </div>
-              </div>
-              {/* Span filter input */}
-              <div className={styles.spanFilterRow}>
-                <Icon name="search" size="sm" style={{ color: 'inherit', opacity: 0.5, flexShrink: 0 }} />
-                <input
-                  className={styles.spanFilterInput}
-                  type="text"
-                  placeholder="Filter spans by name or attribute…"
-                  value={spanFilter}
-                  onChange={(e) => setSpanFilter(e.target.value)}
-                  data-testid="span-filter-input"
-                  aria-label="Filter spans"
-                />
-                {spanFilter && (
-                  <>
-                    <span className={styles.spanFilterCount} data-testid="span-filter-count">
-                      {displayedSpans.length} match{displayedSpans.length !== 1 ? 'es' : ''}
-                    </span>
-                    <button
-                      className={styles.spanFilterClear}
-                      onClick={() => setSpanFilter('')}
-                      title="Clear filter"
-                      aria-label="Clear span filter"
-                      data-testid="span-filter-clear"
-                    >
-                      <Icon name="times" size="sm" />
-                    </button>
-                  </>
-                )}
-              </div>
-
-              {/* BUG-042: empty trace state */}
-              {spans && spans.length === 0 && (
-                <div className={styles.detailPlaceholder} data-testid="empty-trace-message">
-                  No spans found in this trace
-                </div>
-              )}
-
-              {/* BUG-060: filter produced no results */}
-              {displayedSpans.length === 0 && (aiOnly || spanFilter.trim() !== '') && (spans && spans.length > 0) && (
-                <div className={styles.detailPlaceholder} data-testid="empty-filter-message">
-                  No matching spans. Try adjusting your filters.
-                </div>
-              )}
-
-              {/* Only the rows near the viewport are in the DOM; the list is as tall as all rows together. */}
               <div
-                className={styles.spanList}
-                ref={setListElement}
-                style={{ height: displayedSpans.length * SPAN_ROW_HEIGHT }}
-                onMouseLeave={() => setHoveredGuideIds((prev) => (prev.size === 0 ? prev : new Set()))}
+                className={styles.spanListPane}
+                data-testid="span-list-pane"
+                ref={setPaneElement}
+                style={{
+                  ...(agentGraph ? { flex: `${graphSplit} 1 0`, minHeight: GRAPH_PANE_MIN_HEIGHT } : {}),
+                  '--llt-name-column': nameColumnFraction,
+                } as React.CSSProperties}
               >
-                {displayedSpans.slice(renderedStart, renderedEnd + 1).map((span, offset) => {
-                  const i = renderedStart + offset;
-                  return (
-                    // BUG-024: include array index in key to avoid duplicate spanId collisions
-                    <SpanRow
-                      key={span.spanId + '-' + i}
-                      span={span}
-                      top={i * SPAN_ROW_HEIGHT}
-                      isSelected={span.spanId === effectiveSelectedSpanId}
-                      isExpanded={!collapsed.has(span.spanId)}
-                      onToggleExpand={handleToggleExpand}
-                      onClick={handleSelectSpan}
-                      traceStartMs={traceStartMs}
-                      traceDurationMs={traceDurationMs}
-                      displayDepth={aiOnly ? (span.depth ?? 0) - minAiDepth : undefined}
-                      guideContext={guideContext}
-                      agentLayer={agentLayer}
-                    />
-                  );
-                })}
+                <div className={styles.listHeader} ref={listHeaderRef}>
+                  <div className={styles.toolbar}>
+                    <div className={styles.toolbarToggles}>
+                      {/* Both icon names are in Grafana's icon index from 11.3 on, like those of KindIcon. */}
+                      <Button
+                        size="sm"
+                        icon="ai"
+                        variant={aiOnly ? 'primary' : 'secondary'}
+                        fill={aiOnly ? 'solid' : 'outline'}
+                        aria-pressed={aiOnly}
+                        title="Show only AI spans"
+                        data-testid="ai-only-toggle"
+                        onClick={() => setAiOnly((v) => !v)}
+                      >
+                        AI only
+                      </Button>
+                      <Button
+                        size="sm"
+                        icon="sitemap"
+                        variant={graphView ? 'primary' : 'secondary'}
+                        fill={graphView ? 'solid' : 'outline'}
+                        aria-pressed={graphView}
+                        title="Show the agent graph below the span tree"
+                        data-testid="graph-toggle"
+                        onClick={toggleGraph}
+                      >
+                        Graph
+                      </Button>
+                    </div>
+                    <button
+                      onClick={handleExpandOne}
+                      title="Expand +1"
+                      aria-label="Expand +1"
+                      style={iconButtonStyle}
+                    >
+                      <Icon name="angle-down" size="xs" />
+                    </button>
+                    <button
+                      onClick={handleCollapseOne}
+                      title="Collapse +1"
+                      aria-label="Collapse +1"
+                      style={iconButtonStyle}
+                    >
+                      <Icon name="angle-up" size="xs" />
+                    </button>
+                    <button
+                      onClick={handleExpandAll}
+                      title="Expand all spans"
+                      aria-label="Expand all spans"
+                      style={iconButtonStyle}
+                    >
+                      <Icon name="angle-double-down" size="xs" />
+                    </button>
+                    <button
+                      onClick={handleCollapseAll}
+                      title="Collapse all spans"
+                      aria-label="Collapse all spans"
+                      style={iconButtonStyle}
+                    >
+                      <Icon name="angle-double-up" size="xs" />
+                    </button>
+                    <div style={{ marginLeft: 'auto', display: 'flex', gap: theme.spacing(0.5) }}>
+                      <button
+                        onClick={() => setListPaneOpen(false)}
+                        title="Collapse span list"
+                        aria-label="Collapse span list"
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          cursor: 'pointer',
+                          color: theme.colors.text.secondary,
+                          display: 'flex',
+                          alignItems: 'center',
+                          padding: theme.spacing(0.25),
+                          borderRadius: theme.shape.radius.default,
+                        }}
+                      >
+                        <Icon name="angle-left" size="sm" />
+                      </button>
+                      <button
+                        onClick={() => setDetailPaneOpen((v) => !v)}
+                        title={detailPaneOpen ? 'Collapse detail panel' : 'Expand detail panel'}
+                        aria-label={detailPaneOpen ? 'Collapse detail panel' : 'Expand detail panel'}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          cursor: 'pointer',
+                          color: theme.colors.text.secondary,
+                          display: 'flex',
+                          alignItems: 'center',
+                          padding: theme.spacing(0.25),
+                          borderRadius: theme.shape.radius.default,
+                        }}
+                      >
+                        <Icon name={detailPaneOpen ? 'angle-right' : 'angle-left'} size="sm" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className={styles.columnHeader} ref={columnHeaderRef}>
+                    <div className={styles.colNameCell} data-testid="span-list-name-header" ref={setNameHeaderElement}>
+                      <span className={styles.colName}>Span</span>
+                      <NameColumnResizer rowRef={columnHeaderRef} scrollElement={paneElement} onChange={handleNameColumnResize} />
+                    </div>
+                    <span className={styles.colDuration}>Duration</span>
+                    <span className={styles.colBar}>Timeline</span>
+                  </div>
+                </div>
+                {/* Span filter input */}
+                <div className={styles.spanFilterRow}>
+                  <Icon name="search" size="sm" style={{ color: 'inherit', opacity: 0.5, flexShrink: 0 }} />
+                  <input
+                    className={styles.spanFilterInput}
+                    type="text"
+                    placeholder="Filter spans by name or attribute…"
+                    value={spanFilter}
+                    onChange={(e) => setSpanFilter(e.target.value)}
+                    data-testid="span-filter-input"
+                    aria-label="Filter spans"
+                  />
+                  {spanFilter && (
+                    <>
+                      <span className={styles.spanFilterCount} data-testid="span-filter-count">
+                        {displayedSpans.length} match{displayedSpans.length !== 1 ? 'es' : ''}
+                      </span>
+                      <button
+                        className={styles.spanFilterClear}
+                        onClick={() => setSpanFilter('')}
+                        title="Clear filter"
+                        aria-label="Clear span filter"
+                        data-testid="span-filter-clear"
+                      >
+                        <Icon name="times" size="sm" />
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                {/* BUG-042: empty trace state */}
+                {spans && spans.length === 0 && (
+                  <div className={styles.detailPlaceholder} data-testid="empty-trace-message">
+                    No spans found in this trace
+                  </div>
+                )}
+
+                {/* BUG-060: filter produced no results */}
+                {displayedSpans.length === 0 && (aiOnly || spanFilter.trim() !== '') && (spans && spans.length > 0) && (
+                  <div className={styles.detailPlaceholder} data-testid="empty-filter-message">
+                    No matching spans. Try adjusting your filters.
+                  </div>
+                )}
+
+                {/* Only the rows near the viewport are in the DOM; the list is as tall as all rows together. */}
+                <div
+                  className={styles.spanList}
+                  ref={setListElement}
+                  style={{ height: displayedSpans.length * SPAN_ROW_HEIGHT }}
+                  onMouseLeave={() => setHoveredGuideIds((prev) => (prev.size === 0 ? prev : new Set()))}
+                >
+                  {displayedSpans.slice(renderedStart, renderedEnd + 1).map((span, offset) => {
+                    const i = renderedStart + offset;
+                    return (
+                      // BUG-024: include array index in key to avoid duplicate spanId collisions
+                      <SpanRow
+                        key={span.spanId + '-' + i}
+                        span={span}
+                        top={i * SPAN_ROW_HEIGHT}
+                        isSelected={span.spanId === effectiveSelectedSpanId}
+                        isExpanded={!collapsed.has(span.spanId)}
+                        onToggleExpand={handleToggleExpand}
+                        onClick={handleSelectSpan}
+                        traceStartMs={traceStartMs}
+                        traceDurationMs={traceDurationMs}
+                        displayDepth={aiOnly ? (span.depth ?? 0) - minAiDepth : undefined}
+                        guideContext={guideContext}
+                        agentLayer={agentLayer}
+                      />
+                    );
+                  })}
+                </div>
               </div>
+              {agentGraph && (
+                <>
+                  <PaneDivider container={columnElement} fraction={graphSplit} onChange={setGraphSplit} onCommit={handleGraphSplitCommit} />
+                  <div className={styles.agentGraphSection} data-testid="agent-graph-section" style={{ flex: `${1 - graphSplit} 1 0`, minHeight: GRAPH_PANE_MIN_HEIGHT }}>
+                    <AgentGraph graph={agentGraph} selectedSpanId={selectedSpanId} onSelectSpan={handleSelectGraphSpan} />
+                  </div>
+                </>
+              )}
             </div>
           )}
 

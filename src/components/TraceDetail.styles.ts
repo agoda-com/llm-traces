@@ -3,6 +3,10 @@ import type { GrafanaTheme2 } from '@grafana/data';
 
 export const SPAN_LIST_MIN_WIDTH = 330;
 export const SPAN_DETAIL_MIN_WIDTH = 300;
+/** The least height that the span tree and the agent graph each keep, wherever the divider between them is dragged. */
+export const GRAPH_PANE_MIN_HEIGHT = 120;
+/** The graph draws its nodes in columns, so the list column is widened to at least this while the graph is shown. */
+export const GRAPH_COLUMN_MIN_WIDTH = 640;
 const RESIZE_HANDLE_WIDTH = 5;
 export const SPAN_DETAIL_RESERVED_WIDTH = SPAN_DETAIL_MIN_WIDTH + RESIZE_HANDLE_WIDTH;
 export const TRACE_DETAIL_MIN_WIDTH = SPAN_LIST_MIN_WIDTH + SPAN_DETAIL_RESERVED_WIDTH;
@@ -55,10 +59,23 @@ export const getStyles = (theme: GrafanaTheme2) => ({
     overflow: 'hidden',
     position: 'relative',
   }),
+  // Holds the span tree and, while the agent graph is on, the divider and the graph below it.
+  spanListColumn: css({
+    display: 'flex',
+    flexDirection: 'column',
+    flexShrink: 0,
+    overflow: 'hidden',
+  }),
   spanListPane: css({
+    flex: '1 1 auto',
+    minHeight: 0,
     overflow: 'auto',
     overscrollBehavior: 'contain',
-    flexShrink: 0,
+  }),
+  agentGraphSection: css({
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
   }),
   resizeHandle: css({
     width: `${RESIZE_HANDLE_WIDTH}px`,

@@ -106,6 +106,7 @@ A trace can be opened directly with a link to `/a/agoda-llmtraces-app?llt-traceI
 - See token usage and estimated cost per span, based on a built-in price list.
 - Explore the span hierarchy in a timeline with indent guides, a resizable name column, and collapse and expand controls (`]` collapse all, `[` expand all, `p` collapse one level, `o` expand one level). Traces with tens of thousands of spans or thousands of levels stay responsive.
 - See which agent owns each span: each agent is marked with a colour in the tree, agent spans show the agent name and the agent that handed the work over, and icons mark LLM, tool and agent spans.
+- Show the agent graph below the span tree: one node per agent, tool, model, guardrail and retriever, with call counts, durations and failures. Click a node to select its spans one after another, or select a span in the tree to highlight its node.
 - Switch between the LLM, OpenInference and OTel GenAI views of the same span.
 - Resize the trace list and the detail panels. The layout stays readable on narrow screens.
 

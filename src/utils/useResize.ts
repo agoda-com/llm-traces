@@ -31,5 +31,5 @@ export function useResize(initialPx: number, min: number, max: number) {
     [min, max]
   );
 
-  return { width, onMouseDown };
+  return { width, setWidth, onMouseDown };
 }
