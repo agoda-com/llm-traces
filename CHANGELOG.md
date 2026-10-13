@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.3 - 2026-10-13
+
+### Features
+- The trace tree shows which agent owns each span. Each agent gets a colour, shown as a rail on the left edge of its spans; traces with more than five agents reuse the colours. Agent spans show the agent name in bold, followed by "from X" when another agent handed the work over, and the other spans an agent runs carry a chip with its name.
+- Kind icons replace the LLM, TOOL and AGENT text badges. Hover an icon to see the kind.
+- The span detail header shows the span kind, the agent that owns the span or handed it off, and the agent description when the trace provides one.
+- Agent names are read from `gen_ai.agent.name`, `agent.name`, or the span name of `invoke_agent <name>` and `create_agent <name>` spans.
+- Deep and large traces behave like Grafana's trace view. Every level gets its own indent guide with no depth cap, and hovering a guide highlights the line from an ancestor through all of its descendants. When the guides do not fit, the levels nearest the name fold into a "+N" marker, so the span name, duration and timeline stay visible.
+- The name column can be resized by dragging (20% to 85% of the row), and the width is remembered in the browser.
+- Expand +1 and Collapse +1 buttons open or close one level of the tree. As in Grafana, `o` and `p` do the same from the keyboard, and `[` and `]` expand or collapse everything. Selecting a span opens its collapsed ancestors.
+- Only the rows near the viewport are rendered, so a 30,000-span trace opens with about 1,800 DOM nodes in the span list.
+
+### Bug Fixes
+- Span chains thousands of levels deep no longer overflow the call stack.
+- The service name and the agent labels in a span row are shown whole or hidden when the row is narrow, never cut into fragments. The service name now follows the span name, so names line up after the kind icon.
+
 ## 0.1.2 - 2026-10-13
 
 ### Bug Fixes
