@@ -132,6 +132,11 @@ export interface Point {
   y: number;
 }
 
+export interface ScrollPosition {
+  left: number;
+  top: number;
+}
+
 export interface Rect {
   left: number;
   top: number;
@@ -234,4 +239,59 @@ export function getGraphInView(graph: AgentGraph, placed: PlacedGraph, view: Rec
     })
     .map((node) => node.id);
   return { nodeIds, edges: placed.edges.filter((e) => overlaps(e.bounds, view)) };
+}
+
+// ---- Scale and scroll position ----
+
+/** The graph opens at this scale or larger, because the text of a node is hard to read below it. */
+export const READABLE_SCALE = 0.8;
+const FIT_MARGIN = 4;
+const SMALLEST_FIT_SCALE = 0.05;
+
+export interface Size {
+  width: number;
+  height: number;
+}
+
+/** The scale at which the whole graph fits in the view, at most 100%. */
+export function getFitScale(content: Size, view: Size): number {
+  if (view.width <= 0 || view.height <= 0) {
+    return 1;
+  }
+  const fit = Math.min((view.width - FIT_MARGIN) / content.width, (view.height - FIT_MARGIN) / content.height);
+  return Math.min(1, Math.max(SMALLEST_FIT_SCALE, fit));
+}
+
+/** The scale a graph opens at: the one that fits it, but not below READABLE_SCALE. The reader pans around the rest. */
+export function getDefaultScale(content: Size, view: Size): number {
+  return Math.max(READABLE_SCALE, getFitScale(content, view));
+}
+
+const clamp = (value: number, max: number) => Math.min(Math.max(0, value), Math.max(0, max));
+
+/**
+ * Where to scroll to when the graph opens on `target`: the left edge when the target fits next to Start (so that
+ * Start stays in view), otherwise the target in the middle of the view. The same goes for the vertical axis.
+ */
+export function getInitialScroll(target: Box, scale: number, view: Size, content: Size): ScrollPosition {
+  const axis = (start: number, length: number, viewLength: number, contentLength: number) =>
+    (start + length) * scale <= viewLength ? 0 : clamp((start + length / 2) * scale - viewLength / 2, contentLength * scale - viewLength);
+  return { left: axis(target.x, target.width, view.width, content.width), top: axis(target.y, target.height, view.height, content.height) };
+}
+
+/**
+ * Where to scroll to so that `target` is in view, or undefined when it already is. A target that is out of view on
+ * one axis is centred on that axis; the other axis stays where it is.
+ */
+export function getRevealScroll(target: Box, scale: number, view: Size, scroll: ScrollPosition, content: Size): ScrollPosition | undefined {
+  const axis = (start: number, length: number, current: number, viewLength: number, contentLength: number) => {
+    const from = start * scale;
+    const to = (start + length) * scale;
+    return from >= current && to <= current + viewLength
+      ? current
+      : clamp((start + length / 2) * scale - viewLength / 2, contentLength * scale - viewLength);
+  };
+  const left = axis(target.x, target.width, scroll.left, view.width, content.width);
+  const top = axis(target.y, target.height, scroll.top, view.height, content.height);
+  return left === scroll.left && top === scroll.top ? undefined : { left, top };
 }

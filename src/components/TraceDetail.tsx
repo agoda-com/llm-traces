@@ -30,9 +30,14 @@ interface TraceDetailViewProps {
   onBack: () => void;
   /** BUG-072: increment this when re-opening the same trace to force state reset */
   openCount?: number;
+  /**
+   * Called when the agent graph is shown or hidden. `needsWidth` is true when the detail view is too narrow to give
+   * the graph the list column width it needs, so the page can free horizontal space.
+   */
+  onGraphShownChange?: (shown: boolean, needsWidth: boolean) => void;
 }
 
-export function TraceDetailView({ traceId, rootName, spans, loading, error, onBack, openCount = 0 }: TraceDetailViewProps) {
+export function TraceDetailView({ traceId, rootName, spans, loading, error, onBack, openCount = 0, onGraphShownChange }: TraceDetailViewProps) {
   const styles = useStyles2(getStyles);
   const theme = useTheme2();
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
@@ -46,6 +51,8 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
   const [userDismissedDetail, setUserDismissedDetail] = useState(false);
   const { width: spanListWidth, setWidth: setSpanListWidth, onMouseDown: onSpanListResize } = useResize(500, SPAN_LIST_MIN_WIDTH, 900);
   const widthBeforeGraphRef = useRef<number | null>(null);
+  const onGraphShownChangeRef = useRef(onGraphShownChange);
+  onGraphShownChangeRef.current = onGraphShownChange;
   const [nameColumnFraction, setNameColumnFraction] = useState(loadNameColumnFraction);
   const [graphSplit, setGraphSplit] = useState(loadGraphSplit);
   // Counts the node clicks, so that clicking the selected node again still scrolls the tree back to its span.
@@ -74,6 +81,7 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
     if (widthBeforeGraphRef.current !== null) {
       setSpanListWidth(widthBeforeGraphRef.current);
       widthBeforeGraphRef.current = null;
+      onGraphShownChangeRef.current?.(false, false);
     }
     setSpanFilter('');
     setUserDismissedDetail(false);
@@ -141,16 +149,21 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
   }, [selectSpan]);
 
   // The list column is widened while the graph is shown, and gets the width the reader chose back when it is hidden.
+  // When the detail view has no room to widen it, the page is asked to give up space too, e.g. by closing the trace list.
   const toggleGraph = useCallback(() => {
     if (!graphView) {
+      const body = columnElement?.parentElement;
+      const room = body ? body.clientWidth - (detailPaneOpen ? SPAN_DETAIL_RESERVED_WIDTH : 0) : Infinity;
       widthBeforeGraphRef.current = spanListWidth;
       setSpanListWidth(Math.max(spanListWidth, GRAPH_COLUMN_MIN_WIDTH));
+      onGraphShownChange?.(true, room < GRAPH_COLUMN_MIN_WIDTH);
     } else if (widthBeforeGraphRef.current !== null) {
       setSpanListWidth(widthBeforeGraphRef.current);
       widthBeforeGraphRef.current = null;
+      onGraphShownChange?.(false, false);
     }
     setGraphView(!graphView);
-  }, [graphView, spanListWidth, setSpanListWidth]);
+  }, [graphView, spanListWidth, setSpanListWidth, columnElement, detailPaneOpen, onGraphShownChange]);
 
   // A node can hold a span that the filters hide, so the click clears the filters that would hide it.
   const handleSelectGraphSpan = useCallback((spanId: string) => {

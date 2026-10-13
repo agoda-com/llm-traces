@@ -3,7 +3,7 @@
 
 import { buildAgentGraph, getAgentGraph, getNodeClickTarget, indexGraphSpans, START_NODE_ID } from '../src/utils/agentGraph.ts';
 import type { AgentGraph } from '../src/utils/agentGraph.ts';
-import { getGraphInView, layoutAgentGraph, MAX_ROWS, placeAgentGraph } from '../src/utils/agentGraphLayout.ts';
+import { getDefaultScale, getFitScale, getInitialScroll, getGraphInView, getRevealScroll, layoutAgentGraph, MAX_ROWS, placeAgentGraph, READABLE_SCALE } from '../src/utils/agentGraphLayout.ts';
 import type { PluginSpan } from '../src/utils/tempoClient.ts';
 
 let passed = 0;
@@ -321,6 +321,37 @@ describe('model calls without a model name', () => {
   assertEquals(unnamed?.modelUnknown, true, 'the node says that the model is unknown');
   assertEquals(unnamed?.subtitle, 'a', 'it still names the agent that made the calls');
   assertEquals(graph.nodes.find((n) => n.id === 'llm:a:model-x')?.modelUnknown, false, 'a call with a model name is not marked');
+});
+
+describe('scale and scroll position of the drawn graph', () => {
+  const content = { width: 1000, height: 400 };
+  assertEquals(getFitScale(content, { width: 2000, height: 1000 }), 1, 'a graph that fits is drawn at 100%, never larger');
+  assertEquals(getFitScale(content, { width: 504, height: 1000 }), 0.5, 'the fit scale leaves a 4px margin');
+  assertEquals(getFitScale(content, { width: 2000, height: 204 }), 0.5, 'and goes by the height when that is tighter');
+  assertEquals(getFitScale({ width: 100000, height: 400 }, { width: 500, height: 500 }) > 0, true, 'a huge graph still has a positive fit scale');
+  assertEquals(getFitScale(content, { width: 0, height: 0 }), 1, 'an unmeasured view gives 100%');
+
+  assertEquals(READABLE_SCALE, 0.8, 'text is never drawn below 80% by default');
+  assertEquals(getDefaultScale(content, { width: 2000, height: 1000 }), 1, 'a graph that fits opens at 100%');
+  assertEquals(getDefaultScale(content, { width: 904, height: 1000 }), 0.9, 'a graph that fits only when scaled down a little opens at that scale');
+  assertEquals(getDefaultScale(content, { width: 504, height: 1000 }), 0.8, 'a graph that would need less than 80% opens at 80%');
+
+  const view = { width: 600, height: 300 };
+  const wide = { width: 3000, height: 800 };
+  const startBox = { x: 20, y: 380, width: 76, height: 42 };
+  const near = { x: 250, y: 100, width: 168, height: 42 };
+  const far = { x: 2000, y: 100, width: 168, height: 42 };
+  assertEquals(getInitialScroll(startBox, 1, view, wide), { left: 0, top: 251 }, 'the view opens at the left edge on Start, centred vertically');
+  assertEquals(getInitialScroll(near, 1, view, wide).left, 0, 'a selected node that fits next to Start keeps Start in view');
+  assertEquals(getInitialScroll(far, 1, view, wide).left, 2084 - 300, 'a selected node further right is centred');
+  assertEquals(getInitialScroll(far, 1, view, { width: 2300, height: 800 }).left, 2300 - 600, 'and the view stops at the end of the graph');
+  assertEquals(getInitialScroll(near, 1, view, { width: 400, height: 200 }), { left: 0, top: 0 }, 'a graph smaller than the view does not scroll');
+
+  assertEquals(getRevealScroll(near, 1, view, { left: 0, top: 0 }, wide), undefined, 'a node that is in view is left where it is');
+  assertEquals(getRevealScroll(far, 1, view, { left: 0, top: 0 }, wide), { left: 2084 - 300, top: 0 }, 'a node out of view horizontally is centred, without moving the other axis');
+  assertEquals(getRevealScroll(far, 1, view, { left: 1900, top: 0 }, wide), undefined, 'including when the scroll position is part way');
+  assertEquals(getRevealScroll(near, 1, view, { left: 400, top: 0 }, wide), { left: 34, top: 0 }, 'a node scrolled out to the left is brought back');
+  assertEquals(getRevealScroll({ x: 250, y: 700, width: 168, height: 42 }, 0.5, view, { left: 0, top: 0 }, wide), { left: 0, top: 100 }, 'the scale is applied first: this node sits at y 350 on screen, past a 300px view, and the scroll stops at the end of the graph');
 });
 
 describe('calls', () => {

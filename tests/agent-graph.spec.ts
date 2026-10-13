@@ -452,6 +452,153 @@ test.describe('Graph content', () => {
   });
 });
 
+const scaleOf = async (page: Page) => Number(await page.getByTestId('agent-graph').getAttribute('data-scale'));
+const scrollOf = (page: Page) => page.getByTestId('agent-graph').evaluate((graph) => ({ left: graph.scrollLeft, top: graph.scrollTop, maxLeft: graph.scrollWidth - graph.clientWidth }));
+const insideGraph = async (page: Page, target: Locator) => {
+  const view = await box(page.getByTestId('agent-graph'));
+  const rect = await target.boundingBox();
+  return !!rect && rect.x >= view.x - 0.5 && rect.x + rect.width <= view.x + view.width + 0.5;
+};
+
+test.describe('Trace list', () => {
+  const traceItem = (page: Page) => page.getByTestId(`trace-item-${ADK_GRAPH.traceId}`);
+
+  test('showing the graph closes the trace list when the detail view has no room, and hiding it opens the list again', async ({ page }) => {
+    await openTrace(page, ADK_GRAPH, { graph: false });
+    await expect(traceItem(page)).toBeVisible();
+    await page.getByTestId('graph-toggle').click();
+    await expect(traceItem(page)).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Expand trace list' })).toBeVisible();
+    expect((await box(page.getByTestId('span-list-column'))).width, 'the list column got the width the graph needs').toBeGreaterThanOrEqual(639);
+
+    await page.getByTestId('graph-toggle').click();
+    await expect(traceItem(page)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Expand trace list' })).toHaveCount(0);
+  });
+
+  test('a trace list that the reader reopens while the graph is shown stays open', async ({ page }) => {
+    await openTrace(page, ADK_GRAPH);
+    await expect(traceItem(page)).toHaveCount(0);
+    await page.getByRole('button', { name: 'Expand trace list' }).click();
+    await expect(traceItem(page)).toBeVisible();
+    await expect(page.getByTestId('agent-graph')).toBeVisible();
+    await page.getByTestId('graph-toggle').click();
+    await expect(page.getByTestId('agent-graph')).toHaveCount(0);
+    await expect(traceItem(page), 'hiding the graph leaves the list the reader reopened').toBeVisible();
+  });
+
+  test('a trace list that was already closed stays closed when the graph is hidden', async ({ page }) => {
+    await openTrace(page, ADK_GRAPH, { graph: false });
+    await page.getByRole('button', { name: 'Collapse trace list' }).click();
+    await page.getByTestId('graph-toggle').click();
+    await page.getByTestId('graph-toggle').click();
+    await expect(traceItem(page)).toHaveCount(0);
+  });
+
+  test('the trace list stays open when the window is wide enough for the graph', async ({ page }) => {
+    await page.setViewportSize({ width: 1920, height: 1000 });
+    await openTrace(page, ADK_GRAPH);
+    await expect(traceItem(page)).toBeVisible();
+  });
+
+  test('leaving the trace opens the list the graph closed', async ({ page }) => {
+    await openTrace(page, ADK_GRAPH);
+    await expect(traceItem(page)).toHaveCount(0);
+    await page.getByTestId('trace-detail-view').getByRole('button', { name: /back/i }).click();
+    await expect(traceItem(page)).toBeVisible();
+  });
+});
+
+test.describe('Readable scale and panning', () => {
+  test('a graph that does not fit opens at 80% in a view that scrolls, with Start or the selected node in view', async ({ page }) => {
+    await page.setViewportSize({ width: 800, height: 900 });
+    await openTrace(page, ADK_GRAPH);
+    expect(await scaleOf(page)).toBeCloseTo(0.8, 2);
+    expect((await scrollOf(page)).maxLeft, 'the graph is wider than the view').toBeGreaterThan(50);
+    await expect(page.getByText('80%', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('agent-graph-node').and(page.locator('[aria-pressed="true"]')), 'the selected node is in the opening view').toHaveCount(1);
+    expect(await insideGraph(page, page.locator('[data-testid="agent-graph-node"][aria-pressed="true"]'))).toBe(true);
+  });
+
+  test('a graph that fits at 80% or more is shown whole and keeps Start in view', async ({ page }) => {
+    await openTrace(page, DECLARED_GRAPH);
+    expect(await scaleOf(page)).toBeGreaterThanOrEqual(0.8);
+    expect(await insideGraph(page, page.getByTestId('agent-graph-start'))).toBe(true);
+    expect(await insideGraph(page, page.locator('[data-testid="agent-graph-node"][aria-pressed="true"]'))).toBe(true);
+  });
+
+  test('Fit shows the whole graph at whatever scale it takes, and zoom keeps working', async ({ page }) => {
+    await page.setViewportSize({ width: 800, height: 900 });
+    await openTrace(page, ADK_GRAPH);
+    await page.getByRole('button', { name: 'Fit graph to view' }).click();
+    const fitted = await scaleOf(page);
+    expect(fitted).toBeLessThan(0.8);
+    const scroll = await scrollOf(page);
+    expect(scroll.maxLeft, 'nothing is left to scroll to').toBeLessThanOrEqual(1);
+    const view = await box(page.getByTestId('agent-graph'));
+    const svg = await box(page.getByRole('group', { name: 'Call graph' }));
+    expect(svg.x + svg.width).toBeLessThanOrEqual(view.x + view.width + 0.5);
+    expect(svg.y + svg.height).toBeLessThanOrEqual(view.y + view.height + 0.5);
+
+    const controls = page.getByTestId('agent-graph');
+    await controls.getByRole('button', { name: 'Zoom in' }).click();
+    expect(await scaleOf(page)).toBeCloseTo(fitted * 1.25, 2);
+    await controls.getByRole('button', { name: 'Zoom in' }).click();
+    await controls.getByRole('button', { name: 'Zoom out' }).click();
+    expect(await scaleOf(page)).toBeCloseTo(fitted * 1.25, 2);
+  });
+
+  test('dragging pans the graph; a drag that starts on a node does not select it', async ({ page }) => {
+    await page.setViewportSize({ width: 800, height: 900 });
+    await openTrace(page, ADK_GRAPH);
+    await page.getByTestId('agent-graph').evaluate((graph) => { graph.scrollLeft = 0; });
+    const before = (await scrollOf(page)).left;
+    const target = graphNode(page, 'trip_coordinator');
+    const at = await box(target);
+    await expect(target).toHaveAttribute('aria-pressed', 'false');
+    const x = at.x + at.width / 2;
+    const y = at.y + at.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x - 60, y - 5, { steps: 6 });
+    await page.mouse.up();
+    expect((await scrollOf(page)).left, 'the view moved with the pointer').toBeGreaterThan(before + 40);
+    await expect(target, 'the drag was not a click').toHaveAttribute('aria-pressed', 'false');
+    await expect(page.getByTestId('span-header-raw-name')).not.toContainText('trip_coordinator');
+  });
+
+  test('the mouse wheel scrolls a graph that is wider than the view sideways', async ({ page }) => {
+    await page.setViewportSize({ width: 800, height: 900 });
+    await openTrace(page, ADK_GRAPH);
+    await page.getByTestId('agent-graph').evaluate((graph) => { graph.scrollLeft = 0; });
+    const view = await box(page.getByTestId('agent-graph'));
+    await page.mouse.move(view.x + view.width / 2, view.y + view.height / 2);
+    await page.mouse.wheel(0, 120);
+    await expect.poll(async () => (await scrollOf(page)).left).toBeGreaterThan(50);
+  });
+
+  test('selecting a span in the tree pans to its node when the node is out of view', async ({ page }) => {
+    await page.setViewportSize({ width: 800, height: 900 });
+    await openTrace(page, ADK_GRAPH);
+    await page.getByTestId('agent-graph').evaluate((graph) => { graph.scrollLeft = 0; });
+    const node = graphNode(page, 'lookup_rooms');
+    await expect.poll(() => insideGraph(page, node), { message: 'the node is out of view to begin with' }).toBe(false);
+    await row(page, ADK_GRAPH.ids.roomLookup).click();
+    await expect(node).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(() => insideGraph(page, node), { message: 'the view pans to the selected node' }).toBe(true);
+  });
+
+  test('a node that is already in view does not move the graph when its span is selected', async ({ page }) => {
+    await page.setViewportSize({ width: 800, height: 900 });
+    await openTrace(page, ADK_GRAPH);
+    const before = await scrollOf(page);
+    // The nested generate span belongs to the model call that is selected when the trace opens.
+    await page.locator('[data-testid^="span-row-"]').filter({ has: page.getByTestId('span-operation-name').getByText('generate', { exact: true }) }).first().click();
+    await expect(page.locator('[data-testid="agent-graph-node"][aria-pressed="true"]')).toHaveCount(1);
+    expect((await scrollOf(page)).left).toBeCloseTo(before.left, 0);
+  });
+});
+
 const FIXTURES: Array<[string, GraphFixture]> = [
   ['ADK-like', ADK_GRAPH],
   ['declared parents', DECLARED_GRAPH],
@@ -502,6 +649,8 @@ for (const width of [1440, 800]) {
         expect(geometry.svg.left).toBeGreaterThanOrEqual(section.x - 0.5);
         expect(geometry.svg.top).toBeGreaterThanOrEqual(section.y - 0.5);
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'the page does not scroll sideways').toBe(true);
+
+        expect(Number(await page.getByTestId('agent-graph').getAttribute('data-scale')), 'the graph opens at a readable scale').toBeGreaterThanOrEqual(0.8);
 
         const fits = geometry.svg.right <= section.x + section.width + 0.5 && geometry.svg.bottom <= section.y + section.height + 0.5;
         const scrolls = await page.getByTestId('agent-graph').evaluate((root) => root.scrollWidth > root.clientWidth || root.scrollHeight > root.clientHeight);

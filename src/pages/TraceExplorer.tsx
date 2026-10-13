@@ -55,6 +55,20 @@ export function TraceExplorer() {
     () => Boolean(locationService.getSearchObject()[URL_TRACE_KEY])
   );
   const { width: traceListWidth, onMouseDown: onTraceListResize } = useResize(380, 160, 700);
+  // The agent graph needs width, so showing it can close the trace list. Only a list that the graph closed is
+  // reopened when the graph is hidden: a reader who reopens the list keeps it.
+  const closedForGraphRef = useRef(false);
+  const traceListCollapsedRef = useRef(traceListCollapsed);
+  traceListCollapsedRef.current = traceListCollapsed;
+  const handleGraphShownChange = useCallback((shown: boolean, needsWidth: boolean) => {
+    if (shown && needsWidth && !traceListCollapsedRef.current) {
+      closedForGraphRef.current = true;
+      setTraceListCollapsed(true);
+    } else if (!shown && closedForGraphRef.current) {
+      closedForGraphRef.current = false;
+      setTraceListCollapsed(false);
+    }
+  }, []);
 
   const [timeRange, setTimeRange] = useState<TimeRange>(() => {
     const p = locationService.getSearchObject();
@@ -107,6 +121,13 @@ export function TraceExplorer() {
   // Trace detail management
   const { selectedTraceId, selectedTraceName, traceSpans, traceLoading, traceError, openTrace, openTraceRef, updateTraceName, clearTrace } =
     useOpenTrace(datasourceUid, timeRange.from.valueOf(), timeRange.to.valueOf(), isMountedRef);
+
+  // Closing the trace takes the graph away with it.
+  useEffect(() => {
+    if (!selectedTraceId) {
+      handleGraphShownChange(false, false);
+    }
+  }, [selectedTraceId, handleGraphShownChange]);
 
   // Search management
   const {
@@ -588,7 +609,7 @@ export function TraceExplorer() {
 
         {traceListCollapsed && (
           <button
-            onClick={() => setTraceListCollapsed(false)}
+            onClick={() => { closedForGraphRef.current = false; setTraceListCollapsed(false); }}
             title="Expand trace list"
             aria-label="Expand trace list"
             style={{
@@ -618,6 +639,7 @@ export function TraceExplorer() {
               loading={traceLoading}
               error={traceError || undefined}
               onBack={() => { clearTrace(); }}
+              onGraphShownChange={handleGraphShownChange}
             />
           ) : (
             <div className={styles.empty}>

@@ -5,16 +5,17 @@ import { GrafanaTheme2 } from '@grafana/data';
 import { Icon, useStyles2, useTheme2 } from '@grafana/ui';
 
 import { AgentGraph as AgentGraphModel, GraphEdge, GraphNode, START_NODE_ID, getNodeClickTarget, indexGraphSpans } from '../utils/agentGraph';
-import { Box, NODE_HEIGHT, getGraphInView, layoutAgentGraph, placeAgentGraph } from '../utils/agentGraphLayout';
+import { Box, NODE_HEIGHT, getDefaultScale, getFitScale, getGraphInView, getInitialScroll, getRevealScroll, layoutAgentGraph, placeAgentGraph } from '../utils/agentGraphLayout';
 import { getAgentColors, pickAgentColor } from '../utils/agentColors';
 import { formatDuration } from '../utils/formatUtils';
 import { getSpanKindColor } from '../utils/llmUtils';
 import { KindIcon, getKindLabel } from './KindIcon';
 
-const MIN_FIT_SCALE = 0.5;
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 2;
 const ZOOM_STEP = 1.25;
+/** How far the pointer moves before a press on the graph turns into a pan instead of a click. */
+const DRAG_THRESHOLD = 4;
 const ARROW_HEAD = 'M 0 0 L 10 5 L 0 10 z';
 
 const getStyles = (theme: GrafanaTheme2) => ({
@@ -25,6 +26,11 @@ const getStyles = (theme: GrafanaTheme2) => ({
     overflow: 'auto',
     overscrollBehavior: 'contain',
     background: theme.colors.background.primary,
+    cursor: 'grab',
+    userSelect: 'none',
+  }),
+  panning: css({
+    cursor: 'grabbing',
   }),
   empty: css({
     display: 'flex',
@@ -194,7 +200,9 @@ export function AgentGraph({ graph, selectedSpanId, onSelectSpan }: AgentGraphPr
   const nodeById = useMemo(() => new Map(graph.nodes.map((n) => [n.id, n])), [graph]);
   const [container, setContainer] = useState<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
-  const [zoom, setZoom] = useState<number | null>(null);
+  // null: the scale the graph opens at; 'fit': the whole graph in view, however small that makes it.
+  const [zoom, setZoom] = useState<number | 'fit' | null>(null);
+  const [panning, setPanning] = useState(false);
 
   // Measured before the first paint, so the graph never flashes at full size before it is fitted to the view.
   useLayoutEffect(() => {
@@ -238,10 +246,9 @@ export function AgentGraph({ graph, selectedSpanId, onSelectSpan }: AgentGraphPr
   const selected = selectedSpanId ? locations.get(selectedSpanId) : undefined;
   const selectedNodeId = selected?.nodeId;
 
-  const fitScale = size.width > 0
-    ? Math.min(1, Math.max(MIN_FIT_SCALE, Math.min((size.width - 4) / placed.width, (size.height - 4) / placed.height)))
-    : 1;
-  const scale = zoom ?? fitScale;
+  const scale = zoom === 'fit' ? getFitScale(placed, size) : zoom ?? getDefaultScale(placed, size);
+  const scaleRef = useRef(scale);
+  scaleRef.current = scale;
 
   // The visible area plus one more screen on every side, so that scrolling does not show empty space.
   const { nodeIds: visibleNodeIds, edges: visibleEdges } = useMemo(() => {
@@ -252,25 +259,109 @@ export function AgentGraph({ graph, selectedSpanId, onSelectSpan }: AgentGraphPr
     return getGraphInView(graph, placed, { left: left - width, top: top - height, right: left + 2 * width, bottom: top + 2 * height });
   }, [graph, placed, size, scale, scrollPosition]);
 
-  // A selection made in the span tree can be a node that is scrolled out of view.
-  const scaleRef = useRef(scale);
-  scaleRef.current = scale;
-  useEffect(() => {
-    const at = selectedNodeId ? placed.boxes.get(selectedNodeId) : undefined;
-    if (!container || !at) {
+  // The graph opens on the selected node (or on Start), and a selection made later in the span tree pans to a node
+  // that is out of view.
+  const openedRef = useRef(false);
+  const ready = size.width > 0;
+  useLayoutEffect(() => {
+    const at = placed.boxes.get(selectedNodeId ?? START_NODE_ID);
+    if (!container || !ready || !at) {
       return;
     }
-    const s = scaleRef.current;
-    const left = at.x * s;
-    const top = at.y * s;
-    const right = (at.x + at.width) * s;
-    const bottom = (at.y + at.height) * s;
-    const nextLeft = left < container.scrollLeft ? left : right > container.scrollLeft + container.clientWidth ? right - container.clientWidth : container.scrollLeft;
-    const nextTop = top < container.scrollTop ? top : bottom > container.scrollTop + container.clientHeight ? bottom - container.clientHeight : container.scrollTop;
-    if (nextLeft !== container.scrollLeft || nextTop !== container.scrollTop) {
-      container.scrollTo({ left: nextLeft, top: nextTop });
+    const view = { width: container.clientWidth, height: container.clientHeight };
+    const target = !openedRef.current
+      ? getInitialScroll(at, scaleRef.current, view, placed)
+      : selectedNodeId
+        ? getRevealScroll(at, scaleRef.current, view, { left: container.scrollLeft, top: container.scrollTop }, placed)
+        : undefined;
+    openedRef.current = true;
+    if (target) {
+      container.scrollTo(target);
     }
-  }, [selectedNodeId, placed, container]);
+  }, [selectedNodeId, placed, container, ready]);
+
+  // A zoom keeps the middle of the view where it is; Fit shows the whole graph from its top left corner.
+  const centreRef = useRef<{ x: number; y: number } | null>(null);
+  const zoomTo = (next: number | 'fit') => {
+    if (container) {
+      centreRef.current = { x: (container.scrollLeft + container.clientWidth / 2) / scale, y: (container.scrollTop + container.clientHeight / 2) / scale };
+    }
+    setZoom(next);
+  };
+  useLayoutEffect(() => {
+    const centre = centreRef.current;
+    centreRef.current = null;
+    if (container && centre) {
+      container.scrollTo({ left: centre.x * scale - container.clientWidth / 2, top: centre.y * scale - container.clientHeight / 2 });
+    }
+  }, [scale, container]);
+
+  // Drag to pan. A press that moves less than DRAG_THRESHOLD is still a click on a node. A mouse wheel scrolls
+  // sideways when the graph is wider than the view and not taller.
+  useEffect(() => {
+    if (!container) {
+      return undefined;
+    }
+    let press: { x: number; y: number; left: number; top: number; id: number; dragging: boolean } | null = null;
+    let swallowClick = false;
+    const onDown = (e: PointerEvent) => {
+      if (e.button !== 0 || e.pointerType === 'touch' || (e.target as Element).closest('[data-graph-controls]')) {
+        return;
+      }
+      press = { x: e.clientX, y: e.clientY, left: container.scrollLeft, top: container.scrollTop, id: e.pointerId, dragging: false };
+    };
+    const onMove = (e: PointerEvent) => {
+      if (!press) {
+        return;
+      }
+      const dx = e.clientX - press.x;
+      const dy = e.clientY - press.y;
+      if (!press.dragging && Math.hypot(dx, dy) >= DRAG_THRESHOLD) {
+        press.dragging = true;
+        container.setPointerCapture(press.id);
+        setPanning(true);
+      }
+      if (press.dragging) {
+        container.scrollTo({ left: press.left - dx, top: press.top - dy });
+      }
+    };
+    const onUp = () => {
+      if (press?.dragging) {
+        swallowClick = true;
+        setTimeout(() => { swallowClick = false; }, 0);
+        setPanning(false);
+      }
+      press = null;
+    };
+    const onClick = (e: MouseEvent) => {
+      if (swallowClick) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+    };
+    const onWheel = (e: WheelEvent) => {
+      const sideways = container.scrollWidth > container.clientWidth && container.scrollHeight <= container.clientHeight;
+      if (sideways && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+        e.preventDefault();
+        e.stopPropagation();
+        container.scrollLeft += e.deltaY;
+      }
+    };
+    container.addEventListener('pointerdown', onDown);
+    container.addEventListener('pointermove', onMove);
+    container.addEventListener('pointerup', onUp);
+    container.addEventListener('pointercancel', onUp);
+    container.addEventListener('click', onClick, true);
+    container.addEventListener('wheel', onWheel, { passive: false });
+    return () => {
+      container.removeEventListener('pointerdown', onDown);
+      container.removeEventListener('pointermove', onMove);
+      container.removeEventListener('pointerup', onUp);
+      container.removeEventListener('pointercancel', onUp);
+      container.removeEventListener('click', onClick, true);
+      container.removeEventListener('wheel', onWheel);
+    };
+  }, [container]);
 
   if (graph.nodes.every((n) => n.id === START_NODE_ID)) {
     return (
@@ -357,12 +448,12 @@ export function AgentGraph({ graph, selectedSpanId, onSelectSpan }: AgentGraphPr
   };
 
   return (
-    <div className={styles.root} ref={setContainer} data-testid="agent-graph" role="region" aria-label="Agent graph">
-      <div className={styles.zoom}>
-        <button className={styles.zoomButton} onClick={() => setZoom(Math.max(MIN_ZOOM, scale / ZOOM_STEP))} aria-label="Zoom out" title="Zoom out">−</button>
+    <div className={panning ? `${styles.root} ${styles.panning}` : styles.root} ref={setContainer} data-testid="agent-graph" data-scale={scale.toFixed(3)} role="region" aria-label="Agent graph">
+      <div className={styles.zoom} data-graph-controls>
+        <button className={styles.zoomButton} onClick={() => zoomTo(Math.min(scale, Math.max(MIN_ZOOM, scale / ZOOM_STEP)))} aria-label="Zoom out" title="Zoom out">−</button>
         <span>{Math.round(scale * 100)}%</span>
-        <button className={styles.zoomButton} onClick={() => setZoom(Math.min(MAX_ZOOM, scale * ZOOM_STEP))} aria-label="Zoom in" title="Zoom in">+</button>
-        <button className={styles.zoomButton} onClick={() => setZoom(null)} aria-label="Fit graph to view" title="Fit graph to view">Fit</button>
+        <button className={styles.zoomButton} onClick={() => zoomTo(Math.min(MAX_ZOOM, scale * ZOOM_STEP))} aria-label="Zoom in" title="Zoom in">+</button>
+        <button className={styles.zoomButton} onClick={() => zoomTo('fit')} aria-label="Fit graph to view" title="Show the whole graph">Fit</button>
       </div>
       <svg width={placed.width * scale} height={placed.height * scale} viewBox={`0 0 ${placed.width} ${placed.height}`} role="group" aria-label="Call graph" style={{ display: 'block' }}>
         <defs>
