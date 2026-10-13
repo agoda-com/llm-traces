@@ -5,37 +5,49 @@
 [![Grafana](https://img.shields.io/badge/Grafana-%E2%89%A5%2011.3-F46800?logo=grafana&logoColor=white)](https://grafana.com/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/agoda-com/llm-traces/blob/main/LICENSE)
 
-## Overview
+LLM Traces is a Grafana app plugin for reading LLM and agent traces stored in [Grafana Tempo](https://grafana.com/oss/tempo/).
+Open a trace to see what was sent to the model, what came back, which tools ran, and how the agents called each other.
+It is for engineers who already send OpenTelemetry traces from an LLM application and want to debug them in Grafana.
 
-LLM Traces is a Grafana app plugin that shows the LLM calls recorded in your [Grafana Tempo](https://grafana.com/oss/tempo/) traces.
-You search for traces, open one, and read what was sent to the model and what came back.
-Messages, tool definitions, tool calls and tool results are laid out in order, next to the span timeline, token counts and estimated cost.
+<img src="https://raw.githubusercontent.com/agoda-com/llm-traces/main/docs/images/llm-traces-screenshot.png" alt="A multi-agent trip-planning trace: the span tree with agent rails, the agent graph below it, and an LLM span with its messages and a tool call" width="100%">
 
-The plugin reads standard trace data from an existing Tempo data source.
-It does not need an extra backend or its own configuration.
+## Features
 
-<img src="https://raw.githubusercontent.com/agoda-com/llm-traces/main/docs/images/llm-traces-screenshot.png" alt="LLM Traces showing the trace list, the span timeline and an LLM span with its messages, a tool call card and a tool result card" width="100%">
+- Messages, tool calls and tool results in the order they happened, with Markdown.
+- A searchable tool catalog for each request, down to the raw JSON schema.
+- Agent identity in the span tree: a colour per agent, and who handed work to whom.
+- An agent graph of agents, tools, models and guardrails, with click-through to the spans.
+- Token usage and estimated cost for every span and for the whole trace.
+- Traces with tens of thousands of spans stay responsive.
+- Reads eight tracing conventions, including OpenInference and OTel GenAI.
+
+<img src="https://raw.githubusercontent.com/agoda-com/llm-traces/main/docs/images/llm-traces-tool-catalog.png" alt="An LLM span with a tool result card, the model's tool call, and the tool catalog with one tool expanded" width="100%">
 
 ## Requirements
 
-| Component | Version |
-|-----------|---------|
-| Grafana | 11.3 or newer (end-to-end tested on 11.3, 12.0, 12.4 and 13.1) |
-| Data source | A [Tempo](https://grafana.com/docs/tempo/latest/) data source with [TraceQL](https://grafana.com/docs/tempo/latest/traceql/) search (the sample environment uses Tempo 2.7.2) |
+- Grafana 11.3 or newer.
+  The end-to-end tests run on 11.3, 12.0, 12.4 and 13.1.
+- A [Tempo](https://grafana.com/docs/tempo/latest/) data source with [TraceQL](https://grafana.com/docs/tempo/latest/traceql/) search.
+  The sample environment uses Tempo 2.7.2.
 
-The plugin recognises LLM spans written with these conventions:
+The menu entry uses the `ai-sparkle` icon, which exists only in Grafana 12.0 and newer.
+On Grafana 11.x the entry has no icon.
+Everything else works the same.
 
-- **OpenInference** (for example Arize Phoenix instrumentation)
-- **OpenTelemetry GenAI** semantic conventions (`gen_ai.*` attributes and span events)
-- **Vertex AI** (GCP Vertex AI Agent Builder) and **Google ADK** (`gcp.vertex.agent.*`)
-- **Vercel AI SDK** (`ai.*`)
-- **Pydantic AI** and **Logfire**
-- **Langfuse SDK** (`langfuse.*`)
-- **Traceloop / OpenLLMetry** (`traceloop.*`)
-- **MLflow** (`mlflow.*`)
+### Supported conventions
 
-Known limitation: the menu entry uses the `ai-sparkle` icon, which exists only in Grafana 12.0 and newer.
-On Grafana 11.x the entry appears without an icon; the plugin works the same otherwise.
+| Convention | Attributes it reads |
+|------------|---------------------|
+| OpenInference (for example Arize Phoenix) | `openinference.span.kind`, `llm.*`, `input.value`, `output.value` |
+| OpenTelemetry GenAI | `gen_ai.*` attributes and span events |
+| Google ADK and Vertex AI Agent Builder | `gcp.vertex.agent.*` |
+| Vercel AI SDK | `ai.*` |
+| Pydantic AI and Logfire | `pydantic_ai.*`, `tool_arguments`, `tool_response`, `logfire.msg` |
+| Langfuse SDK | `langfuse.*` |
+| Traceloop and OpenLLMetry | `traceloop.*` |
+| MLflow | `mlflow.*` |
+
+The agent graph is built from `graph.node.id` and `graph.node.parent_id` when spans declare them, from LangGraph `metadata` otherwise, and from span nesting when neither is present.
 
 ## Getting started
 
@@ -49,7 +61,7 @@ grafana cli plugins install agoda-llmtraces-app
 
 Restart Grafana after a CLI install.
 
-### Install manually from a release zip
+### Install from a release zip
 
 1. Download `agoda-llmtraces-app-<version>.zip` from the [Releases](https://github.com/agoda-com/llm-traces/releases) page.
 2. Extract it into the Grafana plugins directory:
@@ -80,42 +92,48 @@ apps:
 ### Configuration
 
 The plugin has no settings of its own.
-It lists every Tempo data source that exists in the organization and uses the first one by default.
-Pick another one in the data source selector at the top of the page.
-If no Tempo data source exists, the page shows a message asking you to add one (**Connections > Data sources > Add data source > Tempo**).
+It lists every Tempo data source in the organization and opens the first one.
+Pick another one in the selector at the top of the page.
+If there is no Tempo data source, the page asks you to add one (**Connections > Data sources > Add data source > Tempo**).
 
-The role required to open the page is Viewer.
-Tempo itself must have trace search enabled, because the plugin finds traces with TraceQL queries.
+Viewer is enough to open the page.
 
-### Use it
+## Using the plugin
 
-1. Select **LLM Traces** in the side menu.
-2. Choose a Tempo data source and a time range.
-3. Use the **Search** tab to filter by service or span name, or the **TraceQL** tab to write your own [TraceQL](https://grafana.com/docs/tempo/latest/traceql/) query. Then click **Search**.
-4. Click a trace to see its span hierarchy.
-5. Click an LLM span to read its messages, tool calls, parameters and token usage.
+1. Select **LLM Traces** in the side menu, then choose a Tempo data source and a time range.
+2. Filter by service or span name on the **Search** tab, or write a query on the **TraceQL** tab.
+   Click **Search**.
+3. Click a trace to open its span tree, then click a span to read its messages, tool calls, parameters and token usage.
+4. Click **Graph** to show the agent graph below the tree.
+   Click a node to select its first call, and click it again to step to the next call (the node shows "2/4").
+   Selecting a span in the tree highlights its node.
+5. Click **AI only** to hide spans that carry no AI attributes, such as HTTP calls.
 
-A trace can be opened directly with a link to `/a/agoda-llmtraces-app?llt-traceId=<trace id>`.
+<img src="https://raw.githubusercontent.com/agoda-com/llm-traces/main/docs/images/llm-traces-agent-graph.png" alt="The agent graph with the search_flights node selected at 2/3, and the matching tool span open in the detail panel" width="100%">
 
-## Features
+To open a trace from a link, use `/a/agoda-llmtraces-app?llt-traceId=<trace id>`.
+The plugin asks Tempo for the trace within the selected time range, which is the last 3 hours by default.
+For an older trace, add `llt-from` and `llt-to`, for example `llt-from=now-24h&llt-to=now`.
+The **Share** button copies a link that also includes the data source (`llt-ds`) and the query (`llt-query`).
 
-- Search LLM traces with TraceQL and filter by LLM-specific attributes.
-- Read input and output messages with Markdown rendering. Text, reasoning, tool call and tool result parts keep their original order.
-- Browse the tool catalog sent with a request. It is collapsed by default, searchable, and each tool expands to its parameters and raw JSON schema.
-- Follow tool calls and results as linked cards with copy buttons. Large results are shortened and can be shown in full.
-- See token usage and estimated cost per span, based on a built-in price list.
-- Explore the span hierarchy in a timeline with indent guides, a resizable name column, and collapse and expand controls (`]` collapse all, `[` expand all, `p` collapse one level, `o` expand one level). Traces with tens of thousands of spans or thousands of levels stay responsive.
-- See which agent owns each span: each agent is marked with a colour in the tree, agent spans show the agent name and the agent that handed the work over, and icons mark LLM, tool and agent spans.
-- Show the agent graph below the span tree: one node per agent, tool, model, guardrail and retriever, with call counts, durations and failures. Click a node to select its spans one after another, or select a span in the tree to highlight its node.
-- Switch between the LLM, OpenInference and OTel GenAI views of the same span.
-- Resize the trace list and the detail panels. The layout stays readable on narrow screens.
+### Keyboard shortcuts
 
-<img src="https://raw.githubusercontent.com/agoda-com/llm-traces/main/docs/images/llm-traces-tool-catalog.png" alt="LLM span detail showing the model output, the searchable tool catalog and an expanded tool definition" width="100%">
+| Key | Action |
+|-----|--------|
+| `j` or `Down` | Select the next span |
+| `k` or `Up` | Select the previous span |
+| `Esc` | Clear the selected span |
+| `]` | Collapse all spans |
+| `[` | Expand all spans |
+| `p` | Collapse one level |
+| `o` | Expand one level |
+
+The shortcuts are ignored while a text field has focus.
 
 ## Try it locally
 
-You can run Grafana, Tempo and the plugin with sample traces using Docker Compose.
-You do not need Node.js, and you do not need to build anything first.
+Docker Compose v2 starts Grafana with the plugin built from source, Tempo, and a few sample traces.
+You do not need Node.js.
 
 ```bash
 git clone https://github.com/agoda-com/llm-traces.git
@@ -126,18 +144,22 @@ docker compose up
 The first start compiles the plugin inside Docker and takes a few minutes.
 Then:
 
-1. Open **http://localhost:3000**. Anonymous access with the Admin role is enabled and the Tempo data source is already provisioned.
-2. Select **LLM Traces** in the side menu. The plugin is already enabled.
-3. Wait about 20 seconds after startup. A seeding container sends four sample traces to Tempo, and Tempo needs a moment to make them searchable.
-4. Click **Search** in the toolbar at the top right. The trace list fills and the newest trace opens. If the list is empty, wait a few seconds and click **Search** again.
-5. Open `support_agent_run` (OpenInference agent with a guardrail check, two LLM calls and a tool call). Click the second span named `llm claude-sonnet-4-5` to see the tool call card, the tool result card and the output. Expand **Available Tools** to search the tool catalog and open a tool definition. Click the `input_guardrail` span to see a guardrail check.
-6. Open `plan_city_break` (OTel GenAI conventions with structured messages and a tool call) and click its `chat gpt-4o` span.
-7. Open `customer_query_chain` and `generate_summary` for plain chat messages, parameters, token counts and estimated cost.
+1. Open http://localhost:3000.
+   Anonymous access with the Admin role is on, and the Tempo data source and the plugin are already set up.
+2. Select **LLM Traces** in the side menu.
+3. About 20 seconds after startup, a seeding container has sent five traces to Tempo.
+   Click **Search**.
+   The trace list fills and the newest trace opens.
+   If the list is empty, wait a few seconds and click **Search** again.
+4. Open `plan_weekend_trip` and click **Graph**.
+   A router agent calls two specialist agents, one of them as a tool, and the graph shows the tools they run and how often.
+5. Open `support_agent_run` and click its second `llm claude-sonnet-4-5` span to see a tool call card, a tool result card and the tool catalog under **Available Tools**.
+
+The other three traces are single chat calls: two in OpenInference and one in OTel GenAI with a tool call.
 
 Tempo also accepts your own traces on `localhost:4317` (OTLP gRPC) and `localhost:4318` (OTLP HTTP).
 If a default host port is taken, set `GRAFANA_PORT`, `TEMPO_OTLP_HTTP_PORT` or `TEMPO_OTLP_GRPC_PORT`.
 Stop the stack and delete its data with `docker compose down -v`.
-Docker Compose v2 is required.
 
 ## Development
 

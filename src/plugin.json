@@ -15,8 +15,9 @@
     ],
     "logos": { "small": "img/logo.svg", "large": "img/logo.svg" },
     "screenshots": [
-      { "name": "Trace list, span timeline and LLM span messages with tool call and result cards", "path": "img/llm-traces-screenshot.png" },
-      { "name": "Model output and the searchable tool catalog with an expanded tool definition", "path": "img/llm-traces-tool-catalog.png" }
+      { "name": "A multi-agent trace: span tree with agent rails, agent graph and an LLM span with a tool call", "path": "img/llm-traces-screenshot.png" },
+      { "name": "Tool result, the model's next tool call and the tool catalog with one tool expanded", "path": "img/llm-traces-tool-catalog.png" },
+      { "name": "Agent graph with a node selected, stepping through its calls", "path": "img/llm-traces-agent-graph.png" }
     ],
     "version": "%VERSION%",
     "updated": "%TODAY%"
