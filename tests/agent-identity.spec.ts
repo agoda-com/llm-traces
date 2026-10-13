@@ -10,6 +10,7 @@ import {
   AGENT_SPAN_IDS as IDS,
   AGENT_TRACE_ID,
   AGENT_TRACE_RESPONSE,
+  LONG_AGENT_DESCRIPTION,
   PRICING_AGENT_NAME,
 } from './fixtures/agent-trace';
 
@@ -303,6 +304,35 @@ test.describe('Detail header', () => {
     const header = page.getByTestId('span-detail-panel');
     await expect(header.getByTestId('span-header-handoff')).toHaveText('handed off from coordinator');
     await expect(header.getByTestId('span-header-agent-description')).toHaveCount(0);
+  });
+
+  test('a long agent description is clamped to three lines and expands on request', async ({ page }) => {
+    await row(page, IDS.pricingAgent).click();
+    const header = page.getByTestId('span-detail-panel');
+    const description = header.getByTestId('span-header-agent-description');
+    const toggle = header.getByTestId('span-header-agent-description-toggle');
+    const lineHeight = await description.evaluate((element) => parseFloat(window.getComputedStyle(element).lineHeight));
+    const height = async () => (await description.boundingBox())!.height;
+
+    await expect(description, 'the clamp hides text, it does not remove it').toHaveText(LONG_AGENT_DESCRIPTION);
+    expect(await height()).toBeLessThanOrEqual(3 * lineHeight + 1);
+    await expect(toggle).toHaveText('Show more');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+
+    await toggle.click();
+    expect(await height()).toBeGreaterThan(6 * lineHeight);
+    await expect(toggle).toHaveText('Show less');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+
+    await toggle.click();
+    expect(await height()).toBeLessThanOrEqual(3 * lineHeight + 1);
+    await expect(toggle).toHaveText('Show more');
+  });
+
+  test('a short agent description has no toggle', async ({ page }) => {
+    await row(page, IDS.coordinator).click();
+    await expect(page.getByTestId('span-header-agent-description')).toBeVisible();
+    await expect(page.getByTestId('span-header-agent-description-toggle')).toHaveCount(0);
   });
 
   test('a tool span shows its kind and owner agent, without handoff or description', async ({ page }) => {

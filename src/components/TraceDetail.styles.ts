@@ -219,10 +219,27 @@ export const getStyles = (theme: GrafanaTheme2) => ({
     fontWeight: theme.typography.fontWeightBold,
     color: theme.colors.text.primary,
   }),
+  spanDetailAgentDescriptionBlock: css({
+    marginBottom: theme.spacing(0.5),
+  }),
   spanDetailAgentDescription: css({
     fontSize: theme.typography.bodySmall.fontSize,
     color: theme.colors.text.secondary,
-    marginBottom: theme.spacing(0.5),
+  }),
+  spanDetailAgentDescriptionClamped: css({
+    display: '-webkit-box',
+    WebkitBoxOrient: 'vertical',
+    WebkitLineClamp: 3,
+    overflow: 'hidden',
+  }),
+  spanDetailAgentDescriptionToggle: css({
+    background: 'none',
+    border: 'none',
+    padding: 0,
+    cursor: 'pointer',
+    color: theme.colors.text.link,
+    fontSize: theme.typography.bodySmall.fontSize,
+    '&:hover': { textDecoration: 'underline' },
   }),
   spanDetailMeta: css({
     fontSize: '11px',

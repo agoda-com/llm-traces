@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useLayoutEffect, useMemo, useState } from 'react';
 import { useStyles2, useTheme2, Icon } from '@grafana/ui';
 import { getStyles } from './TraceDetail.styles';
 import { PluginSpan } from '../utils/tempoClient';
@@ -46,6 +46,48 @@ function getSpanStatus(span: PluginSpan): { isError: boolean; message?: string }
   if (!isError) { return { isError: false }; }
   const message = (span.tags.find((t) => t.key === 'error.message') ?? span.tags.find((t) => t.key === 'exception.message'))?.value as string | undefined;
   return { isError: true, message: message ? String(message) : undefined };
+}
+
+/** An agent's description can run to pages, so it shows three lines until the reader asks for the rest. */
+function AgentDescription({ text }: { text: string }) {
+  const styles = useStyles2(getStyles);
+  const [expanded, setExpanded] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  const [element, setElement] = useState<HTMLDivElement | null>(null);
+
+  useLayoutEffect(() => {
+    if (!element || expanded) {
+      return undefined;
+    }
+    const measure = () => setOverflows(element.scrollHeight > element.clientHeight + 1);
+    measure();
+    const resizeObserver = new ResizeObserver(measure);
+    resizeObserver.observe(element);
+    return () => resizeObserver.disconnect();
+  }, [element, expanded, text]);
+
+  return (
+    <div className={styles.spanDetailAgentDescriptionBlock}>
+      <div
+        ref={setElement}
+        className={expanded ? styles.spanDetailAgentDescription : `${styles.spanDetailAgentDescription} ${styles.spanDetailAgentDescriptionClamped}`}
+        data-testid="span-header-agent-description"
+      >
+        {text}
+      </div>
+      {(overflows || expanded) && (
+        <button
+          type="button"
+          className={styles.spanDetailAgentDescriptionToggle}
+          aria-expanded={expanded}
+          data-testid="span-header-agent-description-toggle"
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? 'Show less' : 'Show more'}
+        </button>
+      )}
+    </div>
+  );
 }
 
 interface SpanDetailPanelProps {
@@ -109,9 +151,7 @@ export function SpanDetailPanel({ span, agentLayer }: SpanDetailPanelProps) {
             )}
           </div>
         )}
-        {agentDescription && (
-          <div className={styles.spanDetailAgentDescription} data-testid="span-header-agent-description">{agentDescription}</div>
-        )}
+        {agentDescription && <AgentDescription text={agentDescription} />}
         <div className={styles.spanDetailMeta}>
           <span>{span.serviceName}</span>
           <span>{formatDuration(span.durationMs)}</span>

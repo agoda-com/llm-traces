@@ -29,6 +29,12 @@ export const AGENT_DESCRIPTIONS = {
 
 export const PRICING_AGENT_NAME = 'availability_and_pricing_specialist';
 
+// Long enough to need many more lines than the detail header shows at any pane width.
+export const LONG_AGENT_DESCRIPTION = Array.from(
+  { length: 30 },
+  (_, i) => `Rule ${i + 1}: compare the quoted price with the last known rate, and report the difference per night.`
+).join(' ');
+
 export const AGENT_SEARCH_RESPONSE = {
   traces: [
     {
@@ -136,7 +142,7 @@ const spans = [
     name: `invoke_agent ${PRICING_AGENT_NAME}`,
     start: 1850,
     end: 2550,
-    attributes: [str('gen_ai.operation.name', 'invoke_agent')],
+    attributes: [str('gen_ai.operation.name', 'invoke_agent'), str('gen_ai.agent.description', LONG_AGENT_DESCRIPTION)],
   },
   {
     spanId: AGENT_SPAN_IDS.pricingLlm,
