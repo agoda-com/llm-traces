@@ -224,6 +224,47 @@ describe('agent ownership - agent names of framework conventions', () => {
   assertEquals(agents.get('ml')?.name, 'qa_agent', 'an MLflow agent span is named after its span');
 });
 
+describe('agent ownership - declared graph parent', () => {
+  const graphTags = (id: string, parentId?: string, name?: string) => [
+    kind('AGENT'),
+    { key: 'graph.node.id', value: id },
+    ...(parentId ? [{ key: 'graph.node.parent_id', value: parentId }] : []),
+    ...(name ? [{ key: 'graph.node.name', value: name }] : []),
+  ];
+  // root
+  //   router        (graph node "router")
+  //     billing     (declared parent "triage", which is not an ancestor)
+  //     refunds     (declared parent "gone", which no span declares)
+  //     self        (declared parent is itself)
+  //     support     (declared parent "router", the same agent that holds it)
+  //   triage        (graph node "triage", named "Triage desk")
+  //     (billing is declared below it, but nested under router)
+  const root = makeSpan('root', null, [kind('CHAIN')]);
+  const router = makeSpan('router', root, graphTags('router'), 'router');
+  const billing = makeSpan('billing', router, graphTags('billing', 'triage'), 'billing');
+  const refunds = makeSpan('refunds', router, graphTags('refunds', 'gone'), 'refunds');
+  const self = makeSpan('self', router, graphTags('self', 'self'), 'self');
+  const support = makeSpan('support', router, graphTags('support', 'router'), 'support');
+  makeSpan('triage', root, graphTags('triage', undefined, 'Triage desk'), 'triage');
+  const agents = getSpanAgents([root]);
+
+  assertEquals(agents.get(billing.spanId)?.handoffFrom, 'Triage desk', 'a declared parent that is not an ancestor wins over nesting, by its graph name');
+  assertEquals(agents.get(refunds.spanId)?.handoffFrom, 'router', 'a declared parent that no span declares falls back to the nesting');
+  assertEquals(agents.get(self.spanId)?.handoffFrom, 'router', 'a node declared as its own parent falls back to the nesting');
+  assertEquals(agents.get(support.spanId)?.handoffFrom, 'router', 'a declared parent equal to the nesting parent says the same');
+  assertEquals(agents.get(router.spanId)?.handoffFrom, undefined, 'a node without a declared parent keeps the nesting rule');
+
+  const later = makeSpan('later', null, [kind('CHAIN')]);
+  const first = makeSpan('first', later, graphTags('first', 'second'), 'first');
+  makeSpan('second', later, agentTags('second'), 'second');
+  makeSpan('second-node', later, graphTags('second'), 'second');
+  assertEquals(getSpanAgents([later]).get(first.spanId)?.handoffFrom, 'second', 'a declared parent may appear after the node that names it');
+
+  const sameName = makeSpan('same-name', null, graphTags('worker', 'planner'), 'worker');
+  makeSpan('planner-node', null, [kind('AGENT'), { key: 'graph.node.id', value: 'planner' }, { key: 'graph.node.name', value: 'worker' }], 'planner');
+  assertEquals(getSpanAgents([sameName]).get(sameName.spanId)?.handoffFrom, undefined, 'a declared parent that reads the same as the agent is not a handoff');
+});
+
 describe('agent ownership - 5,000-level chain of agents', () => {
   const chain: PluginSpan[] = [];
   for (let i = 0; i < 5000; i++) {

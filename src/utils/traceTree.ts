@@ -1,4 +1,5 @@
-import { getAgentName, getSpanKind } from './llmUtils.ts';
+import { getAgentName, getGraphNode, getSpanKind } from './llmUtils.ts';
+import type { GraphNodeAttributes } from './llmUtils.ts';
 import type { PluginSpan } from './tempoClient.ts';
 
 /** Spans by id. When ids repeat, the last span wins, like the parent lookup in tempoClient's buildTree. */
@@ -125,20 +126,32 @@ export function revealSpan(spanId: string, byId: Map<string, PluginSpan>, collap
 /** The agent that owns a span. */
 export interface SpanAgent {
   name: string;
-  /** Name of the nearest ancestor agent when it differs from `name`: the agent this one was handed work by. */
+  /** Name of the agent that handed work to this one: its declared graph parent, else its nearest ancestor agent, when that differs from `name`. */
   handoffFrom?: string;
   /** Position of `name` among the trace's agent names in order of first appearance, for picking a colour. */
   colorIndex: number;
+}
+
+/** What a graph node is called: its graph.node.name, else the name of its agent span, else its id. */
+export function getGraphNodeLabel(span: PluginSpan, node: GraphNodeAttributes): string {
+  return node.name
+    ?? (getSpanKind(span.tags) === 'AGENT' ? getAgentName(span.tags, span.operationName) : undefined)
+    ?? node.id.replace(/^agent:/, '');
 }
 
 /**
  * The owner of every span that has one: the span itself when it is an agent span, otherwise its nearest ancestor
  * agent span. Spans outside every agent are not in the map. Spans owned by the same agent span share one record.
  * An agent span without an agent name is named after its span.
+ *
+ * An agent span that declares a parent with graph.node.parent_id was handed work by that graph node, wherever the
+ * spans nest, so the span view says the same as the agent graph. A parent id that no span declares is ignored.
  */
 export function getSpanAgents(roots: PluginSpan[]): Map<string, SpanAgent> {
   const agents = new Map<string, SpanAgent>();
   const colorIndexes = new Map<string, number>();
+  const graphLabels = new Map<string, string>();
+  const declaredParents: Array<{ agent: SpanAgent; parentId: string }> = [];
   const pending: PluginSpan[] = [];
   const pendingOwners: Array<SpanAgent | undefined> = [];
   for (let i = roots.length - 1; i >= 0; i--) {
@@ -148,6 +161,10 @@ export function getSpanAgents(roots: PluginSpan[]): Map<string, SpanAgent> {
   while (pending.length > 0) {
     const span = pending.pop()!;
     let owner = pendingOwners.pop();
+    const graphNode = getGraphNode(span.tags);
+    if (graphNode && !graphLabels.has(graphNode.id)) {
+      graphLabels.set(graphNode.id, getGraphNodeLabel(span, graphNode));
+    }
     if (getSpanKind(span.tags) === 'AGENT') {
       const name = getAgentName(span.tags, span.operationName) ?? span.operationName;
       let colorIndex = colorIndexes.get(name);
@@ -156,6 +173,9 @@ export function getSpanAgents(roots: PluginSpan[]): Map<string, SpanAgent> {
         colorIndexes.set(name, colorIndex);
       }
       owner = { name, handoffFrom: owner && owner.name !== name ? owner.name : undefined, colorIndex };
+      if (graphNode?.parentId && graphNode.parentId !== graphNode.id) {
+        declaredParents.push({ agent: owner, parentId: graphNode.parentId });
+      }
     }
     if (owner) {
       agents.set(span.spanId, owner);
@@ -163,6 +183,13 @@ export function getSpanAgents(roots: PluginSpan[]): Map<string, SpanAgent> {
     for (let i = span.children.length - 1; i >= 0; i--) {
       pending.push(span.children[i]);
       pendingOwners.push(owner);
+    }
+  }
+  // The declared parent may be a span that comes later in the trace, so it is resolved after the walk.
+  for (const { agent, parentId } of declaredParents) {
+    const label = graphLabels.get(parentId);
+    if (label !== undefined) {
+      agent.handoffFrom = label !== agent.name ? label : undefined;
     }
   }
   return agents;

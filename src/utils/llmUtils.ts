@@ -1919,6 +1919,22 @@ export function getAgentDescription(tags: KeyValuePair[]): string | undefined {
   return getNonBlankAttr(tags, 'gen_ai.agent.description');
 }
 
+/** The node of an agent graph that a span declares with the OpenInference graph.node.* attributes. */
+export interface GraphNodeAttributes {
+  id: string;
+  name?: string;
+  /** Id of the node that called this one. */
+  parentId?: string;
+}
+
+export function getGraphNode(tags: KeyValuePair[]): GraphNodeAttributes | undefined {
+  const id = getNonBlankAttr(tags, 'graph.node.id');
+  if (!id) {
+    return undefined;
+  }
+  return { id, name: getNonBlankAttr(tags, 'graph.node.name'), parentId: getNonBlankAttr(tags, 'graph.node.parent_id') };
+}
+
 export function getSpanKindColor(kind: string | undefined): string {
   switch (kind?.toUpperCase()) {
     case 'LLM': return '#7B61FF';
