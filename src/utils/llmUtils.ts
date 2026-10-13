@@ -2,7 +2,27 @@
 // Extracts LLM span data from OpenInference / OTel GenAI / Vertex AI / generic conventions.
 
 import { formatAttributeValue } from './formatUtils.ts';
-import { extractVercelAi, getVercelAiDisplayName, getVercelAiKind, getVercelAiOperation, type FrameworkSpan } from './frameworkAdapters.ts';
+import {
+  extractLangfuse,
+  extractMlflow,
+  extractPydanticAi,
+  extractTraceloop,
+  extractVercelAi,
+  getLangfuseKind,
+  getMlflowKind,
+  getPydanticAiKind,
+  getTraceloopKind,
+  getVercelAiDisplayName,
+  getVercelAiKind,
+  getVercelAiOperation,
+  hasLangfuseSignature,
+  hasMlflowSignature,
+  hasPydanticAiSignature,
+  hasTraceloopSignature,
+  type FrameworkSpan,
+} from './frameworkAdapters.ts';
+
+export { getSpanMetadata } from './frameworkAdapters.ts';
 
 export interface KeyValuePair {
   key: string;
@@ -72,7 +92,7 @@ export interface LlmInvocationParams {
 export type LlmConvention = 'openinference' | 'otel-genai' | 'vertex' | 'generic' | 'unknown';
 
 // Frameworks with their own attribute conventions on top of, or instead of, OTel GenAI.
-export type LlmFramework = 'vercel-ai' | 'pydantic-ai' | 'langfuse';
+export type LlmFramework = 'vercel-ai' | 'pydantic-ai' | 'langfuse' | 'traceloop' | 'mlflow';
 
 // The instrumentation scope that produced the span (OTLP scopeSpans[].scope).
 export interface SpanScope {
@@ -95,7 +115,19 @@ export function detectFramework(tags: KeyValuePair[], scope?: SpanScope): LlmFra
   if (byScope) {
     return byScope;
   }
-  return getVercelAiOperation(tags) ? 'vercel-ai' : undefined;
+  if (getVercelAiOperation(tags)) {
+    return 'vercel-ai';
+  }
+  if (hasPydanticAiSignature(tags)) {
+    return 'pydantic-ai';
+  }
+  if (hasLangfuseSignature(tags)) {
+    return 'langfuse';
+  }
+  if (hasTraceloopSignature(tags)) {
+    return 'traceloop';
+  }
+  return hasMlflowSignature(tags) ? 'mlflow' : undefined;
 }
 
 export interface LlmSpanData {
@@ -536,6 +568,12 @@ function extractMessagesFromValue(value: unknown): LlmMessage[] {
   if (!isRecord(value)) {
     return [];
   }
+  // Chat completion responses: { choices: [{ message }] }
+  if (Array.isArray(value.choices)) {
+    return value.choices
+      .map((choice) => (isRecord(choice) ? normalizeMessage(choice.message, 'assistant') : undefined))
+      .filter((message): message is LlmMessage => message !== undefined);
+  }
   const messagesField = value.messages ?? value.Messages ?? value.prompt;
   if (Array.isArray(messagesField)) {
     return messagesField
@@ -972,14 +1010,14 @@ function extractGenAiToolSpan(tags: KeyValuePair[]): { input: LlmMessage[]; outp
   return { ...buildToolCallMessages(name, getAttr(tags, 'gen_ai.tool.call.id'), args, response), tools };
 }
 
-function detectConvention(tags: KeyValuePair[], framework = detectFramework(tags)): LlmConvention | null {
+function detectConvention(tags: KeyValuePair[]): LlmConvention | null {
   const oiKind = getAttr(tags, 'openinference.span.kind');
   if (oiKind) {
     return 'openinference';
   }
-  // The AI SDK records OTel GenAI attributes next to its own, but its provider name can look like
-  // Vertex ("google.vertex.chat"), so it is recognised before the Vertex checks.
-  if (framework === 'vercel-ai') {
+  // The AI SDK and Pydantic AI record OTel GenAI attributes next to their own, but a provider name can
+  // look like Vertex ("google.vertex.chat"), so they are recognised before the Vertex checks.
+  if (getVercelAiOperation(tags) || hasPydanticAiSignature(tags)) {
     return 'otel-genai';
   }
   const genAiSystem = getAttr(tags, 'gen_ai.system');
@@ -1004,7 +1042,7 @@ function detectConvention(tags: KeyValuePair[], framework = detectFramework(tags
     (t) => (t.key.endsWith('.operation.type') || t.key === 'operation.type') && String(t.value).toLowerCase().includes('completion')
   );
   const hasMessageAttr = tags.some((t) => typeof t.value === 'string' && looksLikeMessages(t.value));
-  if (hasCompletionType || hasMessageAttr) {
+  if (hasCompletionType || hasMessageAttr || hasLangfuseSignature(tags) || hasTraceloopSignature(tags) || hasMlflowSignature(tags)) {
     return 'generic';
   }
   return null;
@@ -1068,7 +1106,6 @@ function extractOpenInference(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSp
     inputMessages = fromEvents.input;
     outputMessages = fromEvents.output;
   }
-  inputMessages = withSystemInstructions(inputMessages, getRawAttr(tags, 'gen_ai.system_instructions'));
   let invocationParams: LlmInvocationParams = {};
   const invParamsStr = getRawStringAttr(tags, 'llm.invocation_parameters');
   if (invParamsStr) {
@@ -1145,7 +1182,7 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
   // from the requested model (e.g. provider-side aliasing or fallback routing).
   const model = getAttr(tags, 'gen_ai.response.model') || getAttr(tags, 'gen_ai.request.model') || getAttr(tags, 'llm.request.model') || 'unknown';
   const fromEvents = extractMessagesFromEvents(logs);
-  let inputMessages = fromEvents.input;
+  const inputMessages = fromEvents.input;
   const outputMessages = fromEvents.output;
   if (inputMessages.length === 0) {
     const prompt = getAttr(tags, 'gen_ai.prompt');
@@ -1186,7 +1223,6 @@ function extractOtelGenAi(tags: KeyValuePair[], logs: SpanLog[]): Omit<LlmSpanDa
     inputMessages.push(...toolSpan.input);
     outputMessages.push(...toolSpan.output);
   }
-  inputMessages = withSystemInstructions(inputMessages, getRawAttr(tags, 'gen_ai.system_instructions'));
   const finishReasonsRaw = getRawStringAttr(tags, 'gen_ai.response.finish_reasons');
   let finishReasonFromArray: string | undefined;
   if (finishReasonsRaw) {
@@ -1295,36 +1331,73 @@ function extractGeneric(tags: KeyValuePair[], logs: SpanLog[], operationName?: s
   };
 }
 
-// Fills what the standard extraction found nothing for with what the framework's own attributes say.
+// Messages for an input or output value that is not a message list: the text itself.
+function messagesFromFrameworkValue(value: unknown, role: string): LlmMessage[] {
+  const messages = extractMessagesFromValue(value);
+  if (messages.length > 0) {
+    return messages;
+  }
+  // Some frameworks JSON-encode plain text, e.g. "\"because\"".
+  const decoded = parseJsonValue(value);
+  const content = typeof decoded === 'string' ? decodeUnicodeEscapes(decoded) : stringifyValue(value);
+  return content.trim() ? [{ role, content }] : [];
+}
+
+function logfireEventsToLogs(events: Array<Record<string, unknown>>): SpanLog[] {
+  return events.map((event) => ({
+    timestamp: 0,
+    name: typeof event['event.name'] === 'string' ? event['event.name'] : undefined,
+    fields: Object.entries(event).map(([key, value]) => ({ key, value })),
+  }));
+}
+
+// Combines the standard extraction with what a framework's own attributes say. Input and output a framework
+// wrote explicitly replace the standard ones; otherwise they only fill what the standard attributes left empty.
 function applyFrameworkSpan(data: Omit<LlmSpanData, 'isLlm'>, span: FrameworkSpan | undefined): Omit<LlmSpanData, 'isLlm'> {
   if (!span) {
     return data;
   }
+  const fromEvents = span.events ? extractMessagesFromEvents(logfireEventsToLogs(span.events)) : undefined;
+  const hasInput = span.input !== undefined && span.input !== null && span.input !== '';
+  const hasOutput = span.output !== undefined && span.output !== null && span.output !== '';
   const hasMessages = data.inputMessages.length > 0 || data.outputMessages.length > 0;
   const toolMessages = span.tool && !hasMessages
     ? buildToolCallMessages(span.tool.name ?? 'unknown', span.tool.id, toolPayloadText(span.tool.args), toolPayloadText(span.tool.result))
     : undefined;
+  const frameworkInput = hasInput ? messagesFromFrameworkValue(span.input, 'user') : fromEvents?.input ?? toolMessages?.input ?? [];
+  const frameworkOutput = hasOutput ? messagesFromFrameworkValue(span.output, 'assistant') : fromEvents?.output ?? toolMessages?.output ?? [];
   const invocationParams: LlmInvocationParams = { ...data.invocationParams };
   for (const [key, value] of Object.entries(span.params ?? {})) {
     if (invocationParams[key] === undefined) {
       invocationParams[key] = value;
     }
   }
+  const usage = span.usage ?? {};
+  const input = data.tokenUsage.input ?? usage.input;
+  const output = data.tokenUsage.output ?? usage.output;
+  const precomputedCostUsd = data.precomputedCostUsd ?? span.cost;
+  const tools = data.tools.length > 0 ? data.tools : toolDefinitionsFromValue(span.tools);
   return {
     ...data,
     model: data.model === 'unknown' && span.model ? span.model : data.model,
     system: data.system ?? span.system,
-    inputMessages: data.inputMessages.length > 0 ? data.inputMessages : span.input !== undefined ? extractMessagesFromValue(span.input) : toolMessages?.input ?? [],
-    outputMessages: data.outputMessages.length > 0 ? data.outputMessages : span.output !== undefined ? extractMessagesFromValue(span.output) : toolMessages?.output ?? [],
-    tools: data.tools.length > 0 ? data.tools : toolDefinitionsFromValue(span.tools),
+    inputMessages: frameworkInput.length > 0 && (span.explicitIo || data.inputMessages.length === 0) ? frameworkInput : data.inputMessages,
+    outputMessages: frameworkOutput.length > 0 && (span.explicitIo || data.outputMessages.length === 0) ? frameworkOutput : data.outputMessages,
+    tools,
     tokenUsage: {
       ...data.tokenUsage,
-      input: data.tokenUsage.input ?? span.usage?.input,
-      output: data.tokenUsage.output ?? span.usage?.output,
-      total: data.tokenUsage.total ?? span.usage?.total,
+      input,
+      output,
+      // Not every framework reports a total.
+      total: data.tokenUsage.total ?? usage.total ?? (input !== undefined && output !== undefined ? input + output : undefined),
+      ...(data.tokenUsage.cacheRead === undefined && usage.cacheRead !== undefined ? { cacheRead: usage.cacheRead } : {}),
+      ...(data.tokenUsage.cacheWrite === undefined && usage.cacheWrite !== undefined ? { cacheWrite: usage.cacheWrite } : {}),
+      ...(data.tokenUsage.reasoning === undefined && usage.reasoning !== undefined ? { reasoning: usage.reasoning } : {}),
+      ...(data.tokenUsage.audioOutput === undefined && usage.audioOutput !== undefined ? { audioOutput: usage.audioOutput } : {}),
     },
     invocationParams,
     finishReason: data.finishReason ?? span.finishReason,
+    ...(precomputedCostUsd !== undefined ? { precomputedCostUsd } : {}),
   };
 }
 
@@ -1339,12 +1412,17 @@ function isAggregateOperation(tags: KeyValuePair[]): boolean {
 // counting it would double the trace totals.
 function isModelCall(tags: KeyValuePair[], framework: LlmFramework | undefined): boolean {
   const kind = getSpanKind(tags);
-  return kind !== 'TOOL' && !isAggregateOperation(tags) && !(framework === 'vercel-ai' && kind === 'CHAIN');
+  if (framework === 'langfuse' || framework === 'traceloop' || framework === 'mlflow') {
+    return kind === 'LLM' || kind === 'EMBEDDING';
+  }
+  return kind !== 'TOOL' && !isAggregateOperation(tags)
+    && !(framework === 'vercel-ai' && kind === 'CHAIN')
+    && !(framework === 'pydantic-ai' && kind === 'AGENT');
 }
 
 export function extractLlmSpanData(tags: KeyValuePair[], logs: SpanLog[], operationName?: string, scope?: SpanScope): LlmSpanData {
   const framework = detectFramework(tags, scope);
-  const convention = detectConvention(tags, framework);
+  const convention = detectConvention(tags);
   if (!convention) {
     return { isLlm: false, convention: 'unknown', model: '', inputMessages: [], outputMessages: [], tools: [], tokenUsage: {}, invocationParams: {}, finishReason: undefined };
   }
@@ -1373,11 +1451,13 @@ export function extractLlmSpanData(tags: KeyValuePair[], logs: SpanLog[], operat
       break;
     }
     default:
-      data = extractGeneric(tags, logs, operationName);
+      // The span name is only a stand-in model name for spans with no framework of their own.
+      data = extractGeneric(tags, logs, framework ? undefined : operationName);
   }
-  if (framework === 'vercel-ai') {
-    data = applyFrameworkSpan(data, extractVercelAi(tags));
+  for (const frameworkSpan of [extractLangfuse(tags), extractVercelAi(tags), extractPydanticAi(tags), extractTraceloop(tags), extractMlflow(tags)]) {
+    data = applyFrameworkSpan(data, frameworkSpan);
   }
+  data = { ...data, inputMessages: withSystemInstructions(data.inputMessages, getRawAttr(tags, 'gen_ai.system_instructions')) };
   // For OpenInference, only treat the span as LLM if it's an LLM call or a GUARDRAIL
   // (guardrails invoke an LLM internally and carry the same llm.* attributes).
   // CHAIN, TOOL, RETRIEVER etc. are structural spans, not the model call itself.
@@ -1547,6 +1627,47 @@ export function getLlmDisplayAttributeKeys(
     addExact('input.value', 'output.value');
   }
 
+  if (hasPydanticAiSignature(tags)) {
+    if (data.inputMessages.length > 0) {
+      addExact('pydantic_ai.all_messages', 'all_messages_events', 'events', 'prompt', 'tool_arguments');
+    }
+    if (data.outputMessages.length > 0) {
+      addExact('final_result', 'tool_response');
+    }
+    if (data.tools.length > 0) {
+      addExact('model_request_parameters');
+    }
+    if (data.model && data.model !== 'unknown') {
+      addExact('model_name');
+    }
+    if (data.precomputedCostUsd !== undefined) {
+      addExact('operation.cost');
+    }
+    addExact('logfire.msg');
+  }
+  if (hasLangfuseSignature(tags)) {
+    if (data.inputMessages.length > 0) {
+      addExact('langfuse.observation.input', 'langfuse.trace.input');
+    }
+    if (data.outputMessages.length > 0) {
+      addExact('langfuse.observation.output', 'langfuse.trace.output');
+    }
+    addExact(
+      'langfuse.observation.type',
+      'langfuse.observation.model.name',
+      'langfuse.observation.model.parameters',
+      'langfuse.observation.usage_details',
+      'langfuse.observation.cost_details',
+      'langfuse.observation.prompt.name',
+      'langfuse.observation.prompt.version'
+    );
+  }
+  if (hasTraceloopSignature(tags)) {
+    addExact('traceloop.span.kind', 'traceloop.entity.input', 'traceloop.entity.output');
+  }
+  if (hasMlflowSignature(tags)) {
+    addExact('mlflow.spanType', 'mlflow.spanInputs', 'mlflow.spanOutputs');
+  }
   if (data.framework === 'vercel-ai') {
     if (data.inputMessages.length > 0) {
       addExact('ai.prompt.messages', 'ai.prompt', 'ai.toolCall.args', 'ai.toolCall.input', 'ai.values', 'ai.value');
@@ -1594,7 +1715,7 @@ export function isOpenInferenceSpan(tags: KeyValuePair[]): boolean {
 }
 
 export function isEmbeddingSpan(tags: KeyValuePair[]): boolean {
-  if (getVercelAiKind(tags) === 'EMBEDDING') {
+  if ((getVercelAiKind(tags) ?? getLangfuseKind(tags) ?? getMlflowKind(tags)) === 'EMBEDDING') {
     return true;
   }
   const requestType = tags.find((t) => t.key === 'llm.request.type');
@@ -1627,6 +1748,12 @@ export function isLlmSpan(tags: KeyValuePair[]): boolean {
   const vercelAiKind = getVercelAiKind(tags);
   if (vercelAiKind) {
     return vercelAiKind === 'LLM';
+  }
+  if (getPydanticAiKind(tags) === 'AGENT') {
+    return false;
+  }
+  if (hasLangfuseSignature(tags) || hasTraceloopSignature(tags) || hasMlflowSignature(tags)) {
+    return getSpanKind(tags) === 'LLM';
   }
   if (tags.some(
     (t) =>
@@ -1669,6 +1796,7 @@ export function isGuardrailSpan(tags: KeyValuePair[]): boolean {
 const OTEL_OPERATION_TO_KIND: Record<string, string> = {
   // LLM
   chat: 'LLM',
+  completion: 'LLM',
   text_completion: 'LLM',
   completions: 'LLM',
   generate: 'LLM',
@@ -1685,8 +1813,11 @@ const OTEL_OPERATION_TO_KIND: Record<string, string> = {
   embeddings: 'EMBEDDING',
   create_embeddings: 'EMBEDDING',
   embed: 'EMBEDDING',
-  // RERANKER
+  // RETRIEVER and RERANKER
+  retrieval: 'RETRIEVER',
   rerank: 'RERANKER',
+  // CHAIN
+  invoke_workflow: 'CHAIN',
   // GUARDRAIL
   guardrail: 'GUARDRAIL',
   check_guardrail: 'GUARDRAIL',
@@ -1710,15 +1841,23 @@ export function getSpanKind(tags: KeyValuePair[]): string | undefined {
     return oiKind.toUpperCase();
   }
 
+  // Langfuse SDK observation types are set by the application, so they come before the GenAI operation.
+  if (hasLangfuseSignature(tags)) {
+    const langfuseKind = getLangfuseKind(tags);
+    if (langfuseKind) {
+      return langfuseKind;
+    }
+  }
+
   // OTel GenAI / Vertex — derive kind from gen_ai.operation.name
   const opName = getAttr(tags, 'gen_ai.operation.name');
   if (opName) {
     return OTEL_OPERATION_TO_KIND[opName.toLowerCase()] ?? opName.toUpperCase();
   }
 
-  const vercelAiKind = getVercelAiKind(tags);
-  if (vercelAiKind) {
-    return vercelAiKind;
+  const frameworkKind = getVercelAiKind(tags) ?? getPydanticAiKind(tags) ?? getTraceloopKind(tags) ?? getMlflowKind(tags);
+  if (frameworkKind) {
+    return frameworkKind;
   }
 
   // Frameworks such as Pydantic AI set no operation name on tool spans.
@@ -1742,9 +1881,13 @@ export function getSpanKind(tags: KeyValuePair[]): string | undefined {
   return undefined;
 }
 
-/** The span name to show: the AI SDK names spans after the telemetry function id and the tool they call. */
+/**
+ * The span name to show: the AI SDK names spans after the telemetry function id and the tool they call, and
+ * Logfire (Pydantic AI) puts the formatted message of the span in logfire.msg.
+ */
 export function getSpanDisplayName(operationName: string, tags: KeyValuePair[]): string {
-  return getVercelAiDisplayName(tags) ?? operationName;
+  const logfireMessage = getAttr(tags, 'logfire.msg');
+  return getVercelAiDisplayName(tags) ?? (logfireMessage || operationName);
 }
 
 // OTel GenAI names agent spans "invoke_agent <name>" and "create_agent <name>".

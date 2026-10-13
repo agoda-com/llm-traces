@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { useStyles2, useTheme2, Icon } from '@grafana/ui';
 import { getStyles } from './TraceDetail.styles';
 import { PluginSpan } from '../utils/tempoClient';
-import { decodeUnicodeEscapes, extractLlmSpanData, getAgentDescription, getLlmDisplayAttributeKeys, getSpanDisplayName, getSpanKind } from '../utils/llmUtils';
+import { decodeUnicodeEscapes, extractLlmSpanData, getAgentDescription, getLlmDisplayAttributeKeys, getSpanDisplayName, getSpanKind, getSpanMetadata } from '../utils/llmUtils';
 import { pickAgentColor } from '../utils/agentColors';
 import { formatAttributeValue, formatDuration } from '../utils/formatUtils';
 import { KindIcon, getKindLabel } from './KindIcon';
@@ -24,6 +24,11 @@ function tryExpandString(value: unknown): string {
 }
 
 function getSpanStatus(span: PluginSpan): { isError: boolean; message?: string } {
+  // Langfuse SDKs report failures through the observation level instead of the OTel status.
+  if (span.statusCode !== 'ERROR' && span.tags.some((t) => t.key === 'langfuse.observation.level' && String(t.value).toUpperCase() === 'ERROR')) {
+    const message = span.tags.find((t) => t.key === 'langfuse.observation.status_message')?.value;
+    return { isError: true, message: message ? String(message) : undefined };
+  }
   // Prefer the dedicated statusCode field (populated from OTLP status object or attribute fallback)
   if (span.statusCode === 'ERROR') {
     const message = span.statusMessage
@@ -70,6 +75,7 @@ export function SpanDetailPanel({ span, agentLayer }: SpanDetailPanelProps) {
   const llmAttributeEntries = attributeEntries.filter(({ tag }) => llmAttributeKeys.has(tag.key));
   const ordinaryAttributeEntries = attributeEntries.filter(({ tag }) => !llmAttributeKeys.has(tag.key));
   const llmAttributesExpanded = expandedLlmAttributesForSpan === span.spanId;
+  const metadata = useMemo(() => getSpanMetadata(span.tags), [span.tags]);
 
   const renderValue = (value: unknown) => {
     const raw = decodeUnicodeEscapes(formatAttributeValue(value));
@@ -119,6 +125,13 @@ export function SpanDetailPanel({ span, agentLayer }: SpanDetailPanelProps) {
             </span>
           )}
         </div>
+        {metadata.length > 0 && (
+          <div className={styles.spanDetailMeta} data-testid="span-trace-metadata">
+            {metadata.map(({ label, value }) => (
+              <span key={label} title={label} data-testid={`span-metadata-${label.toLowerCase()}`}>{label}: {value}</span>
+            ))}
+          </div>
+        )}
         {spanStatus.isError && spanStatus.message && (
           <div className={styles.spanStatusMessage} data-testid="span-status-message">
             Status Message: {spanStatus.message}

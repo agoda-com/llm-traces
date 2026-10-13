@@ -108,6 +108,8 @@ function getFrameworkLabel(framework: LlmFramework): string {
     case 'vercel-ai': return 'Vercel AI SDK';
     case 'pydantic-ai': return 'Pydantic AI';
     case 'langfuse': return 'Langfuse';
+    case 'traceloop': return 'Traceloop';
+    case 'mlflow': return 'MLflow';
   }
 }
 

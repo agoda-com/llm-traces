@@ -53,6 +53,10 @@ export interface FrameworkUsage {
   input?: number;
   output?: number;
   total?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  reasoning?: number;
+  audioOutput?: number;
 }
 
 export interface FrameworkSpan {
@@ -61,8 +65,13 @@ export interface FrameworkSpan {
   system?: string;
   input?: unknown;
   output?: unknown;
+  // Events in the Logfire format: one record per GenAI event, named by `event.name`.
+  events?: Array<Record<string, unknown>>;
+  // The application set input and output explicitly, so they win over what the standard attributes hold.
+  explicitIo?: boolean;
   tools?: unknown;
   usage?: FrameworkUsage;
+  cost?: number;
   finishReason?: string;
   params?: Record<string, unknown>;
   tool?: { name?: string; id?: string; args?: unknown; result?: unknown };
@@ -278,4 +287,296 @@ export function extractVercelAi(tags: KeyValuePair[]): FrameworkSpan | undefined
   result.output = convertAiSdkResponse(tags);
   result.tools = attr(tags, 'ai.prompt.tools');
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Pydantic AI (Logfire attributes, instrumentation scope "pydantic-ai")
+// ---------------------------------------------------------------------------
+
+const PYDANTIC_AI_KEYS = ['pydantic_ai.all_messages', 'all_messages_events', 'model_request_parameters', 'tool_arguments', 'tool_response'];
+
+// Older Pydantic AI versions put the GenAI events of a model call into one `events` attribute.
+function hasLogfireGenAiEvents(tags: KeyValuePair[]): boolean {
+  const events = recordList(attr(tags, 'events'));
+  return events !== undefined && events.some((event) => typeof event['event.name'] === 'string' && event['event.name'].startsWith('gen_ai.'));
+}
+
+export function hasPydanticAiSignature(tags: KeyValuePair[]): boolean {
+  return tags.some((tag) => PYDANTIC_AI_KEYS.includes(tag.key)) || hasLogfireGenAiEvents(tags);
+}
+
+/** TOOL for tool runs and AGENT for agent runs, which repeat the usage of their model calls. */
+export function getPydanticAiKind(tags: KeyValuePair[]): string | undefined {
+  if (attr(tags, 'tool_arguments') !== undefined || attr(tags, 'tool_response') !== undefined) {
+    return 'TOOL';
+  }
+  if (attr(tags, 'pydantic_ai.all_messages') !== undefined || attr(tags, 'all_messages_events') !== undefined) {
+    return 'AGENT';
+  }
+  return undefined;
+}
+
+function recordList(value: unknown): Array<Record<string, unknown>> | undefined {
+  const parsed = parseJson(value);
+  return Array.isArray(parsed) ? parsed.filter(isRecord) : undefined;
+}
+
+/**
+ * Reads Pydantic AI spans: pydantic_ai.all_messages (or the older all_messages_events and prompt) and final_result
+ * on agent runs, tool_arguments and tool_response on tool runs, the older Logfire `events` attribute on model calls
+ * and model_request_parameters.function_tools as tool definitions.
+ */
+export function extractPydanticAi(tags: KeyValuePair[]): FrameworkSpan | undefined {
+  if (!hasPydanticAiSignature(tags)) {
+    return undefined;
+  }
+  const kind = getPydanticAiKind(tags);
+  const result: FrameworkSpan = { ...(kind ? { kind } : {}) };
+  const modelName = attr(tags, 'model_name');
+  if (typeof modelName === 'string' && modelName) {
+    result.model = modelName;
+  }
+  const cost = numberOf(attr(tags, 'operation.cost'));
+  if (cost !== undefined) {
+    result.cost = cost;
+  }
+  const requestParameters = parseJson(attr(tags, 'model_request_parameters'));
+  if (isRecord(requestParameters) && Array.isArray(requestParameters.function_tools) && requestParameters.function_tools.length > 0) {
+    result.tools = requestParameters.function_tools;
+  }
+  if (kind === 'TOOL') {
+    result.tool = {
+      name: textOf(attr(tags, 'gen_ai.tool.name')),
+      id: textOf(attr(tags, 'gen_ai.tool.call.id')),
+      args: attr(tags, 'tool_arguments'),
+      result: attr(tags, 'tool_response'),
+    };
+    return result;
+  }
+  if (kind === 'AGENT') {
+    const allMessages = attr(tags, 'pydantic_ai.all_messages');
+    const messageEvents = recordList(attr(tags, 'all_messages_events'));
+    const prompt = textOf(attr(tags, 'prompt'));
+    if (allMessages !== undefined) {
+      result.input = parseJson(allMessages);
+    } else if (messageEvents && messageEvents.length > 0) {
+      result.events = messageEvents;
+    } else if (prompt) {
+      result.input = [{ role: 'user', content: prompt }];
+    }
+    const finalResult = textOf(attr(tags, 'final_result'));
+    if (finalResult) {
+      result.output = [{ role: 'assistant', content: finalResult }];
+    }
+    return result;
+  }
+  const events = recordList(attr(tags, 'events'));
+  if (events) {
+    result.events = events;
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Langfuse SDK attributes (langfuse.observation.*, langfuse.trace.*)
+// ---------------------------------------------------------------------------
+
+export function hasLangfuseSignature(tags: KeyValuePair[]): boolean {
+  return tags.some((tag) => tag.key.startsWith('langfuse.'));
+}
+
+const LANGFUSE_KINDS: Record<string, string> = {
+  generation: 'LLM',
+  embedding: 'EMBEDDING',
+  agent: 'AGENT',
+  tool: 'TOOL',
+  chain: 'CHAIN',
+  retriever: 'RETRIEVER',
+  guardrail: 'GUARDRAIL',
+  evaluator: 'EVALUATOR',
+  event: 'EVENT',
+};
+
+const LANGFUSE_GENERATION_KEYS = [
+  'langfuse.observation.model.name',
+  'langfuse.observation.model.parameters',
+  'langfuse.observation.usage_details',
+  'langfuse.observation.cost_details',
+  'langfuse.observation.prompt.name',
+  'langfuse.observation.prompt.version',
+];
+
+/** The observation type as a span kind. A plain span has none. */
+export function getLangfuseKind(tags: KeyValuePair[]): string | undefined {
+  const type = textOf(attr(tags, 'langfuse.observation.type'))?.toLowerCase();
+  const hasGenerationAttributes = tags.some((tag) => LANGFUSE_GENERATION_KEYS.includes(tag.key));
+  // SDK 3.3 and older record generations as plain spans that carry generation attributes.
+  if ((type === undefined || type === 'span') && hasGenerationAttributes) {
+    return 'LLM';
+  }
+  return type ? LANGFUSE_KINDS[type] : undefined;
+}
+
+function jsonRecord(value: unknown): Record<string, unknown> | undefined {
+  const parsed = parseJson(value);
+  return isRecord(parsed) ? parsed : undefined;
+}
+
+function langfuseUsage(details: Record<string, unknown>): FrameworkUsage {
+  const count = (...keys: string[]) => keys.map((key) => numberOf(details[key])).find((value) => value !== undefined);
+  const cacheRead = count('input_cached_tokens', 'input_cache_read', 'input_cache_read_tokens', 'cache_read_input_tokens');
+  const cacheWrite = count('input_cache_creation', 'input_cache_write', 'input_cache_write_tokens', 'cache_creation_input_tokens');
+  const cacheWriteLong = (count('input_cache_creation_5m') ?? 0) + (count('input_cache_creation_1h') ?? 0);
+  const reasoning = count('output_reasoning_tokens', 'output_reasoning');
+  const audioOutput = count('output_audio_tokens');
+  const input = count('input', 'promptTokens', 'prompt_tokens', 'input_tokens');
+  const output = count('output', 'completionTokens', 'completion_tokens', 'output_tokens');
+  // Langfuse usage types are separate units: "input" excludes the cached and written tokens and "output"
+  // excludes reasoning and audio. Elsewhere in this plugin input and output include them.
+  const totalCacheWrite = (cacheWrite ?? 0) + cacheWriteLong;
+  return {
+    input: input === undefined ? undefined : input + (cacheRead ?? 0) + totalCacheWrite,
+    output: output === undefined ? undefined : output + (reasoning ?? 0) + (audioOutput ?? 0),
+    total: count('total', 'totalTokens', 'total_tokens'),
+    cacheRead,
+    cacheWrite: cacheWrite === undefined && cacheWriteLong === 0 ? undefined : totalCacheWrite,
+    reasoning,
+    audioOutput,
+  };
+}
+
+function langfuseCost(details: Record<string, unknown>): number | undefined {
+  const total = numberOf(details.total);
+  if (total !== undefined) {
+    return total;
+  }
+  const parts = Object.values(details).map(numberOf).filter((value): value is number => value !== undefined);
+  return parts.length > 0 ? parts.reduce((sum, value) => sum + value, 0) : undefined;
+}
+
+/**
+ * Reads the attributes the Langfuse SDKs write: langfuse.observation.input / output (the trace-level input and
+ * output as a fallback), model.name, model.parameters, usage_details, cost_details and prompt.name / version.
+ */
+export function extractLangfuse(tags: KeyValuePair[]): FrameworkSpan | undefined {
+  if (!hasLangfuseSignature(tags)) {
+    return undefined;
+  }
+  const kind = getLangfuseKind(tags);
+  const result: FrameworkSpan = { ...(kind ? { kind } : {}), explicitIo: true };
+  result.input = firstAttr(tags, ['langfuse.observation.input', 'langfuse.trace.input']);
+  result.output = firstAttr(tags, ['langfuse.observation.output', 'langfuse.trace.output']);
+  const model = textOf(attr(tags, 'langfuse.observation.model.name'));
+  if (model) {
+    result.model = model;
+  }
+  const params: Record<string, unknown> = { ...jsonRecord(attr(tags, 'langfuse.observation.model.parameters')) };
+  const promptName = textOf(attr(tags, 'langfuse.observation.prompt.name'));
+  const promptVersion = attr(tags, 'langfuse.observation.prompt.version');
+  if (promptName) {
+    params.promptName = promptName;
+  }
+  if (promptName && promptVersion !== undefined && promptVersion !== '') {
+    params.promptVersion = promptVersion;
+  }
+  result.params = params;
+  const usage = jsonRecord(attr(tags, 'langfuse.observation.usage_details'));
+  if (usage) {
+    result.usage = langfuseUsage(usage);
+  }
+  const cost = jsonRecord(attr(tags, 'langfuse.observation.cost_details'));
+  if (cost) {
+    result.cost = langfuseCost(cost);
+  }
+  return result;
+}
+
+/** Facts about the trace and the observation that the detail header shows next to the span. The prompt is a parameter. */
+export function getSpanMetadata(tags: KeyValuePair[]): Array<{ label: string; value: string }> {
+  const text = (...keys: string[]) => textOf(firstAttr(tags, keys));
+  const tagList = firstAttr(tags, ['langfuse.trace.tags', 'langfuse.tags', 'ai.telemetry.metadata.tags', 'tag.tags']);
+  const parsedTags = parseJson(tagList);
+  const level = text('langfuse.observation.level');
+  const entries: Array<[string, string | undefined]> = [
+    ['Trace', text('langfuse.trace.name')],
+    ['User', text('langfuse.user.id', 'user.id', 'ai.telemetry.metadata.userId')],
+    ['Session', text('langfuse.session.id', 'session.id', 'gen_ai.conversation.id', 'ai.telemetry.metadata.sessionId')],
+    ['Tags', Array.isArray(parsedTags) ? parsedTags.map(String).join(', ') : textOf(tagList)],
+    ['Environment', text('langfuse.environment')],
+    ['Release', text('langfuse.release')],
+    ['Version', text('langfuse.version')],
+    ['Level', level && level.toUpperCase() !== 'DEFAULT' ? level : undefined],
+    ['Status', text('langfuse.observation.status_message')],
+  ];
+  return entries.flatMap(([label, value]) => (value ? [{ label, value }] : []));
+}
+
+// ---------------------------------------------------------------------------
+// Traceloop / OpenLLMetry entity spans
+// ---------------------------------------------------------------------------
+
+// Only spans that carry traceloop.span.kind or entity input / output are Traceloop entity spans. OpenLLMetry
+// model spans also carry traceloop.workflow.name and traceloop.entity.name, but they are GenAI spans.
+export function hasTraceloopSignature(tags: KeyValuePair[]): boolean {
+  return tags.some((tag) => ['traceloop.span.kind', 'traceloop.entity.input', 'traceloop.entity.output'].includes(tag.key));
+}
+
+const TRACELOOP_KINDS: Record<string, string> = { workflow: 'CHAIN', task: 'CHAIN', agent: 'AGENT', tool: 'TOOL' };
+
+export function getTraceloopKind(tags: KeyValuePair[]): string | undefined {
+  const kind = textOf(attr(tags, 'traceloop.span.kind'))?.toLowerCase();
+  return kind ? TRACELOOP_KINDS[kind] : undefined;
+}
+
+/** Reads traceloop.entity.input / output, and turns tool entities into a tool call. */
+export function extractTraceloop(tags: KeyValuePair[]): FrameworkSpan | undefined {
+  if (!hasTraceloopSignature(tags)) {
+    return undefined;
+  }
+  const kind = getTraceloopKind(tags);
+  const input = attr(tags, 'traceloop.entity.input');
+  const output = attr(tags, 'traceloop.entity.output');
+  if (kind === 'TOOL') {
+    return { kind, tool: { name: textOf(attr(tags, 'traceloop.entity.name')), args: input, result: output } };
+  }
+  return { ...(kind ? { kind } : {}), input, output };
+}
+
+// ---------------------------------------------------------------------------
+// MLflow tracing
+// ---------------------------------------------------------------------------
+
+export function hasMlflowSignature(tags: KeyValuePair[]): boolean {
+  return tags.some((tag) => ['mlflow.spanType', 'mlflow.spanInputs', 'mlflow.spanOutputs'].includes(tag.key));
+}
+
+const MLFLOW_KINDS: Record<string, string | undefined> = {
+  LLM: 'LLM',
+  CHAT_MODEL: 'LLM',
+  CHAIN: 'CHAIN',
+  AGENT: 'AGENT',
+  TOOL: 'TOOL',
+  RETRIEVER: 'RETRIEVER',
+  EMBEDDING: 'EMBEDDING',
+  RERANKER: 'RERANKER',
+  UNKNOWN: undefined,
+};
+
+/** MLflow stores the span type as JSON text, e.g. "\"LLM\"". Types without a kind of their own keep their name. */
+export function getMlflowKind(tags: KeyValuePair[]): string | undefined {
+  const raw = parseJson(attr(tags, 'mlflow.spanType'));
+  const type = textOf(raw)?.toUpperCase();
+  if (!type) {
+    return undefined;
+  }
+  return type in MLFLOW_KINDS ? MLFLOW_KINDS[type] : type;
+}
+
+/** Reads mlflow.spanInputs and mlflow.spanOutputs. */
+export function extractMlflow(tags: KeyValuePair[]): FrameworkSpan | undefined {
+  if (!hasMlflowSignature(tags)) {
+    return undefined;
+  }
+  const kind = getMlflowKind(tags);
+  return { ...(kind ? { kind } : {}), input: attr(tags, 'mlflow.spanInputs'), output: attr(tags, 'mlflow.spanOutputs') };
 }

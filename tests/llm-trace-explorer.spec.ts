@@ -1,7 +1,7 @@
 import { test, expect, Page } from '@playwright/test';
 import { SEARCH_RESPONSE, TRACE_RESPONSE, VERTEX_TRACE_RESPONSE, OTEL_GENAI_TRACE_RESPONSE, GENERIC_TRACE_RESPONSE, STRUCTURED_SEARCH_RESPONSE, STRUCTURED_TRACE_RESPONSE } from './fixtures/llm-trace';
 import { waitForToolbarLayout } from './waitForToolbarLayout';
-import { CONVENTION_SEARCH_RESPONSE, GENAI_EVENTS_TRACE, GENAI_TOOL_TRACE, STRUCTURED_ATTRIBUTES_TRACE, VERCEL_AI_TRACE, TOKEN_DETAILS_TRACE } from './fixtures/conventions';
+import { CONVENTION_SEARCH_RESPONSE, GENAI_EVENTS_TRACE, GENAI_TOOL_TRACE, STRUCTURED_ATTRIBUTES_TRACE, VERCEL_AI_TRACE, TOKEN_DETAILS_TRACE, PYDANTIC_AI_TRACE, LANGFUSE_SDK_TRACE, TRACELOOP_TRACE, MLFLOW_TRACE } from './fixtures/conventions';
 
 const PLUGIN_URL = '/a/agoda-llmtraces-app';
 async function mockTempoApis(page: Page) {
@@ -1675,5 +1675,101 @@ test.describe('Token details, cost and aggregate agent spans', () => {
     await expect(stats).not.toContainText('9,999');
     await expect(stats.getByTestId('llm-span-count')).toHaveText('3');
     await expect(stats).toContainText('~$0.045');
+  });
+});
+
+test.describe('Pydantic AI', () => {
+  test('agent run span shows the conversation, the final result and the logfire message as its name', async ({ page }) => {
+    await openConventionTrace(page, PYDANTIC_AI_TRACE, 'pydspan00000001');
+    await expect(page.getByTestId('span-detail-panel')).toContainText('joke_agent run');
+    const detail = page.getByTestId('llm-span-detail');
+    await expect(detail.getByText('Pydantic AI', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('llm-span-kind')).toContainText('AGENT');
+    await expect(detail.getByTestId('input-messages-section').getByTestId('message-block-system')).toContainText('You write jokes about the topic');
+    await expect(detail.getByTestId('output-section')).toContainText('Too many tells.');
+  });
+
+  test('model call shows the tool definitions, the tool call it requests and the reported cost', async ({ page }) => {
+    await openConventionTrace(page, PYDANTIC_AI_TRACE, 'pydspan00000002');
+    const detail = page.getByTestId('llm-span-detail');
+    await expect(detail.getByTestId('available-tools-section')).toContainText('Available Tools (1)');
+    await expect(detail.getByTestId('output-section').getByTestId('message-part-tool_call')).toContainText('get_pun');
+    await expect(detail.getByTestId('params-section')).toContainText('Reported Cost');
+  });
+
+  test('tool span without an operation name shows the tool call and result', async ({ page }) => {
+    await openConventionTrace(page, PYDANTIC_AI_TRACE, 'pydspan00000003');
+    const detail = page.getByTestId('llm-span-detail');
+    await expect(page.getByTestId('llm-span-kind')).toContainText('TOOL');
+    await expect(detail.getByTestId('message-part-tool_call')).toContainText('cats');
+    await expect(detail.getByTestId('message-part-tool_result')).toContainText('nine lives');
+  });
+
+  test('older Logfire events attribute is read as messages', async ({ page }) => {
+    await openConventionTrace(page, PYDANTIC_AI_TRACE, 'pydspan00000004');
+    const detail = page.getByTestId('llm-span-detail');
+    await expect(detail.getByTestId('input-messages-section')).toContainText('Tell me a joke about cats');
+    await expect(detail.getByTestId('output-section')).toContainText('Too many tells.');
+  });
+
+  test('the agent run usage is not added to the trace totals', async ({ page }) => {
+    await openConventionTrace(page, PYDANTIC_AI_TRACE, 'pydspan00000001');
+    // Model calls: 417+53 and 85+12 tokens. The agent run repeats the usage of its calls.
+    await expect(page.getByTestId('trace-stats-row')).toContainText('567');
+    await expect(page.getByTestId('trace-stats-row').getByTestId('llm-span-count')).toHaveText('2');
+  });
+});
+
+test.describe('Langfuse SDK attributes', () => {
+  test('generation shows messages, parameters, usage, reported cost, prompt and level', async ({ page }) => {
+    await openConventionTrace(page, LANGFUSE_SDK_TRACE, 'lfspan000000002');
+    const detail = page.getByTestId('llm-span-detail');
+    await expect(detail.getByText('Langfuse', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('llm-span-kind')).toContainText('LLM');
+    await expect(detail.getByTestId('llm-model-name')).toHaveText('model-a');
+    await expect(detail.getByTestId('input-messages-section').getByTestId('message-block-system')).toContainText('You are a support agent.');
+    await expect(detail.getByTestId('output-section')).toContainText('It ships tomorrow.');
+    const params = detail.getByTestId('params-section');
+    await expect(params).toContainText('138');
+    await expect(params).toContainText('Reported Cost');
+    await expect(params).toContainText('promptName');
+    await expect(page.getByTestId('span-metadata-level')).toHaveText('Level: WARNING');
+  });
+
+  test('trace attributes on a span are shown in the header', async ({ page }) => {
+    await openConventionTrace(page, LANGFUSE_SDK_TRACE, 'lfspan000000001');
+    const metadata = page.getByTestId('span-trace-metadata');
+    await expect(metadata).toContainText('Trace: support-chat');
+    await expect(metadata).toContainText('User: user-7');
+    await expect(metadata).toContainText('Session: session-9');
+    await expect(metadata).toContainText('Tags: beta, eu');
+    await expect(metadata).toContainText('Environment: staging');
+    await expect(page.getByTestId('llm-span-detail')).toContainText('question');
+  });
+});
+
+test.describe('Traceloop and MLflow', () => {
+  test('Traceloop workflow and tool entity spans', async ({ page }) => {
+    await openConventionTrace(page, TRACELOOP_TRACE, 'tlspan000000001');
+    await expect(page.getByTestId('llm-span-kind')).toContainText('CHAIN');
+    await expect(page.getByTestId('llm-span-detail').getByText('Traceloop', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('input-messages-section')).toContainText('"args"');
+    await expect(page.getByTestId('output-section')).toContainText('Too many tells.');
+    await page.getByTestId('span-row-tlspan000000002').click();
+    await expect(page.getByTestId('llm-span-kind')).toContainText('TOOL');
+    await expect(page.getByTestId('llm-span-detail').getByTestId('message-part-tool_call')).toContainText('lookup');
+    await expect(page.getByTestId('llm-span-detail').getByTestId('message-part-tool_result')).toContainText('Cats are mammals.');
+  });
+
+  test('MLflow chain and chat model spans', async ({ page }) => {
+    await openConventionTrace(page, MLFLOW_TRACE, 'mlspan000000001');
+    await expect(page.getByTestId('llm-span-kind')).toContainText('CHAIN');
+    await expect(page.getByTestId('llm-span-detail').getByText('MLflow', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('input-messages-section')).toContainText('What is MLflow?');
+    await expect(page.getByTestId('output-section')).toContainText('An open source platform');
+    await page.getByTestId('span-row-mlspan000000002').click();
+    await expect(page.getByTestId('llm-span-kind')).toContainText('LLM');
+    await expect(page.getByTestId('input-messages-section').getByTestId('message-block-user')).toContainText('What is MLflow?');
+    await expect(page.getByTestId('output-section').getByTestId('message-block-assistant')).toContainText('An open source platform');
   });
 });

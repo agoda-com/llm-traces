@@ -8,6 +8,7 @@ import {
   getLlmDisplayAttributeKeys,
   getSpanDisplayName,
   getSpanKind,
+  getSpanMetadata,
   isEmbeddingSpan,
   isLlmSpan,
   type KeyValuePair,
@@ -624,6 +625,269 @@ describe('aggregate agent spans are not model calls', () => {
   const openInferenceAgent = extractLlmSpanData([kv('openinference.span.kind', 'LLM'), kv('gen_ai.operation.name', 'invoke_agent'), kv('llm.model_name', 'm')], []);
   assertEquals(openInferenceAgent.isLlm, true, 'only the GenAI operation name marks a span as aggregate, not OpenInference spans');
   assertEquals(extractLlmSpanData([kv('gen_ai.operation.name', 'create_agent'), kv('gen_ai.usage.input_tokens', 1)], []).isLlm, true, 'create_agent is unaffected');
+});
+
+// ---------------------------------------------------------------------------
+// Area 6: frameworks (Pydantic AI / Logfire, Langfuse SDK, Traceloop, MLflow) and operation names
+// ---------------------------------------------------------------------------
+
+describe('Pydantic AI chat span (instrumentation version 2: GenAI message attributes)', () => {
+  const tags = [
+    kv('gen_ai.operation.name', 'chat'),
+    kv('gen_ai.system', 'openai'),
+    kv('gen_ai.request.model', 'model-a'),
+    kv('gen_ai.system_instructions', JSON.stringify([{ type: 'text', content: 'You write jokes.' }])),
+    kv('gen_ai.input.messages', JSON.stringify([
+      { role: 'user', parts: [{ type: 'text', content: 'Write a joke' }] },
+      { role: 'assistant', parts: [{ type: 'tool_call', id: 'call_1', name: 'get_pun', arguments: { topic: 'cats' } }] },
+      { role: 'user', parts: [{ type: 'tool_call_response', id: 'call_1', name: 'get_pun', result: 'purr-fect' }] },
+    ])),
+    kv('gen_ai.output.messages', JSON.stringify([{ role: 'assistant', parts: [{ type: 'text', content: 'Cats are purr-fect.' }], finish_reason: 'stop' }])),
+    kv('model_request_parameters', JSON.stringify({
+      function_tools: [{ name: 'get_pun', description: 'Suggest a pun', parameters_json_schema: { type: 'object', properties: { topic: { type: 'string' } }, required: ['topic'] } }],
+      output_tools: [{ name: 'final_result', parameters_json_schema: { type: 'object' } }],
+    })),
+    kv('gen_ai.usage.input_tokens', 417),
+    kv('gen_ai.usage.output_tokens', 53),
+    kv('operation.cost', 0.0001),
+  ];
+  const result = extractLlmSpanData(tags, [], 'chat model-a', { name: 'pydantic-ai', version: '1.26.0' });
+  assertEquals(result.framework, 'pydantic-ai', 'framework');
+  assertDeepEquals(result.inputMessages.map((m) => m.role), ['system', 'user', 'assistant', 'user'], 'system instructions, user, tool call, tool response');
+  assertEquals(result.inputMessages[2].toolCalls?.[0].name, 'get_pun', 'tool call part');
+  assertEquals(result.tools.map((t) => t.name).join(','), 'get_pun', 'function_tools are the tool definitions, output tools are not');
+  assertEquals(result.tools[0].description, 'Suggest a pun', 'tool description');
+  assertEquals(result.outputMessages[0].parts?.[0].type === 'text' ? result.outputMessages[0].parts[0].text : '', 'Cats are purr-fect.', 'output');
+  assertEquals(result.isLlm, true, 'model call');
+  assertEquals(result.precomputedCostUsd, 0.0001, 'operation.cost is the reported cost');
+});
+
+describe('Pydantic AI agent run span', () => {
+  const tags = [
+    kv('gen_ai.agent.name', 'joke_agent'),
+    kv('logfire.msg', 'joke_agent run'),
+    kv('model_name', 'model-a'),
+    kv('gen_ai.usage.input_tokens', 502),
+    kv('gen_ai.usage.output_tokens', 14),
+    kv('pydantic_ai.all_messages', JSON.stringify([
+      { role: 'system', parts: [{ type: 'text', content: 'You write jokes.' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'Tell me a joke' }] },
+    ])),
+    kv('final_result', 'Because light attracts bugs!'),
+  ];
+  const result = extractLlmSpanData(tags, [], 'agent run', { name: 'pydantic-ai' });
+  assertEquals(getSpanKind(tags), 'AGENT', 'agent run is an AGENT');
+  assertEquals(result.isLlm, false, 'the agent run repeats the usage of its model calls');
+  assertDeepEquals(result.inputMessages.map((m) => m.role), ['system', 'user'], 'all messages are the input');
+  assertEquals(result.outputMessages[0].content, 'Because light attracts bugs!', 'final_result is the output');
+  assertEquals(getSpanDisplayName('agent run', tags), 'joke_agent run', 'logfire.msg is the display name');
+  assert(!isLlmSpan(tags), 'not an LLM span');
+  assert(getLlmDisplayAttributeKeys(tags, result).has('pydantic_ai.all_messages'), 'attributes shown above are promoted');
+});
+
+describe('Pydantic AI tool span without an operation name', () => {
+  const tags = [
+    kv('gen_ai.tool.name', 'get_pun'),
+    kv('gen_ai.tool.call.id', 'call_1'),
+    kv('tool_arguments', '{"topic":"cats"}'),
+    kv('tool_response', 'purr-fect'),
+    kv('logfire.msg', 'running tool: get_pun'),
+  ];
+  const result = extractLlmSpanData(tags, [], 'running tool', { name: 'pydantic-ai' });
+  assertEquals(getSpanKind(tags), 'TOOL', 'TOOL');
+  assertEquals(result.inputMessages[0].toolCalls?.[0].arguments, '{"topic":"cats"}', 'tool_arguments');
+  assert(result.outputMessages[0].parts?.[0].type === 'tool_result' && result.outputMessages[0].parts[0].result === 'purr-fect', 'tool_response');
+  assertEquals(result.isLlm, false, 'not a model call');
+  const withoutIdentity = extractLlmSpanData([kv('tool_arguments', '{"a":1}'), kv('tool_response', '2')], []);
+  assertEquals(withoutIdentity.inputMessages[0].toolCalls?.[0].name, 'unknown', 'tool name falls back to unknown');
+});
+
+describe('Pydantic AI instrumentation version 1: Logfire events attribute', () => {
+  const events = [
+    { content: 'You are helpful.', role: 'system', 'gen_ai.system': 'openai', 'gen_ai.message.index': 0, 'event.name': 'gen_ai.system.message' },
+    { content: 'What is Langfuse?', role: 'user', 'gen_ai.message.index': 0, 'event.name': 'gen_ai.user.message' },
+    { index: 0, message: { role: 'assistant', content: 'An observability tool.' }, 'event.name': 'gen_ai.choice' },
+  ];
+  for (const [label, value] of [['JSON string', JSON.stringify(events)], ['native array', events]] as const) {
+    const result = extractLlmSpanData([kv('gen_ai.operation.name', 'chat'), kv('gen_ai.system', 'openai'), kv('events', value)], []);
+    assertDeepEquals(result.inputMessages.map((m) => [m.role, m.content]), [['system', 'You are helpful.'], ['user', 'What is Langfuse?']], `events input (${label})`);
+    assertEquals(result.outputMessages[0].content, 'An observability tool.', `events choice output (${label})`);
+  }
+  const agent = extractLlmSpanData([
+    kv('agent_name', 'qa_agent'),
+    kv('gen_ai.usage.input_tokens', 31),
+    kv('all_messages_events', JSON.stringify([
+      { content: 'You are helpful.', role: 'system', 'event.name': 'gen_ai.system.message' },
+      { content: 'What is Langfuse?', role: 'user', 'event.name': 'gen_ai.user.message' },
+      { role: 'assistant', content: 'An observability tool.', 'event.name': 'gen_ai.assistant.message' },
+    ])),
+    kv('final_result', 'An observability tool.'),
+  ], []);
+  assertDeepEquals(agent.inputMessages.map((m) => m.role), ['system', 'user', 'assistant'], 'all_messages_events is the conversation');
+  assertEquals(agent.outputMessages[0].content, 'An observability tool.', 'final_result');
+  const prompted = extractLlmSpanData([kv('agent_name', 'qa_agent'), kv('all_messages_events', '[]'), kv('prompt', 'Hello'), kv('final_result', 'Hi')], []);
+  assertEquals(prompted.inputMessages[0]?.content, 'Hello', 'prompt is the input when there are no message events');
+});
+
+describe('Langfuse SDK attributes', () => {
+  const tags = [
+    kv('langfuse.observation.type', 'generation'),
+    kv('langfuse.observation.model.name', 'model-a'),
+    kv('langfuse.observation.model.parameters', '{"temperature":0.2,"max_tokens":256}'),
+    kv('langfuse.observation.input', JSON.stringify([{ role: 'system', content: 'Be brief.' }, { role: 'user', content: 'Hi' }])),
+    kv('langfuse.observation.output', JSON.stringify({ role: 'assistant', content: 'Hello' })),
+    kv('langfuse.observation.usage_details', '{"input":100,"output":20,"total":120}'),
+    kv('langfuse.observation.cost_details', '{"input":0.001,"output":0.002,"total":0.003}'),
+    kv('langfuse.observation.prompt.name', 'greeting'),
+    kv('langfuse.observation.prompt.version', 3),
+    kv('langfuse.observation.level', 'WARNING'),
+    kv('langfuse.observation.status_message', 'slow'),
+  ];
+  const result = extractLlmSpanData(tags, [], 'my-generation', { name: 'langfuse-sdk', version: '3.10.5' });
+  assertEquals(result.framework, 'langfuse', 'framework');
+  assertEquals(getSpanKind(tags), 'LLM', 'generation is LLM');
+  assertEquals(result.isLlm, true, 'generation is a model call');
+  assertEquals(result.model, 'model-a', 'model');
+  assertDeepEquals(result.inputMessages.map((m) => m.role), ['system', 'user'], 'input messages');
+  assertEquals(result.outputMessages[0].content, 'Hello', 'output message');
+  assertEquals((result.invocationParams as Record<string, unknown>).temperature, 0.2, 'model parameters');
+  assertEquals(result.tokenUsage.input, 100, 'usage input');
+  assertEquals(result.tokenUsage.total, 120, 'usage total');
+  assertEquals(result.precomputedCostUsd, 0.003, 'cost_details total');
+  assertEquals((result.invocationParams as Record<string, unknown>).promptName, 'greeting', 'prompt name');
+  assertEquals((result.invocationParams as Record<string, unknown>).promptVersion, 3, 'prompt version');
+  assert(getLlmDisplayAttributeKeys(tags, result).has('langfuse.observation.usage_details'), 'attributes shown above are promoted');
+});
+
+describe('Langfuse SDK usage details are additive', () => {
+  const result = extractLlmSpanData([
+    kv('langfuse.observation.type', 'generation'),
+    kv('langfuse.observation.usage_details', '{"input":100,"output":20,"input_cached_tokens":900,"input_cache_creation":50,"output_reasoning_tokens":5,"total":1075}'),
+  ], []);
+  assertEquals(result.tokenUsage.input, 1050, 'input includes the cached tokens, as everywhere else in the plugin');
+  assertEquals(result.tokenUsage.cacheRead, 900, 'cache read');
+  assertEquals(result.tokenUsage.cacheWrite, 50, 'cache write');
+  assertEquals(result.tokenUsage.output, 25, 'output includes reasoning');
+  assertEquals(result.tokenUsage.reasoning, 5, 'reasoning');
+});
+
+describe('Langfuse SDK observation types', () => {
+  const kind = (type: string, extra: KeyValuePair[] = []) => getSpanKind([kv('langfuse.observation.type', type), ...extra]);
+  assertEquals(kind('generation'), 'LLM', 'generation');
+  assertEquals(kind('embedding'), 'EMBEDDING', 'embedding');
+  assertEquals(kind('agent'), 'AGENT', 'agent');
+  assertEquals(kind('tool'), 'TOOL', 'tool');
+  assertEquals(kind('chain'), 'CHAIN', 'chain');
+  assertEquals(kind('retriever'), 'RETRIEVER', 'retriever');
+  assertEquals(kind('guardrail'), 'GUARDRAIL', 'guardrail');
+  assertEquals(kind('evaluator'), 'EVALUATOR', 'evaluator');
+  assertEquals(kind('event'), 'EVENT', 'event');
+  assertEquals(kind('span'), undefined, 'a plain span has no kind');
+  assertEquals(kind('span', [kv('langfuse.observation.model.name', 'm')]), 'LLM', 'a span with generation attributes is a generation (SDK 3.3 and older)');
+  const span = extractLlmSpanData([kv('langfuse.observation.type', 'span'), kv('langfuse.observation.input', '{"q":"x"}'), kv('langfuse.observation.output', 'done')], []);
+  assertEquals(span.isLlm, false, 'a span is not a model call');
+  assertEquals(span.inputMessages[0].content, '{"q":"x"}', 'non-message input is shown as text');
+  assertEquals(span.outputMessages[0].content, 'done', 'text output');
+  assertEquals(extractLlmSpanData([kv('langfuse.observation.type', 'tool'), kv('langfuse.observation.input', '{"city":"Paris"}')], []).isLlm, false, 'tool is not a model call');
+});
+
+describe('Langfuse trace attributes are shown as span metadata', () => {
+  const metadata = getSpanMetadata([
+    kv('langfuse.trace.name', 'checkout'),
+    kv('user.id', 'user-7'),
+    kv('session.id', 'session-9'),
+    kv('langfuse.trace.tags', ['beta', 'eu']),
+    kv('langfuse.environment', 'staging'),
+    kv('langfuse.release', 'r42'),
+    kv('langfuse.version', 'v3'),
+    kv('langfuse.observation.level', 'WARNING'),
+    kv('langfuse.observation.status_message', 'slow'),
+  ]);
+  const byLabel = Object.fromEntries(metadata.map((m) => [m.label, m.value]));
+  assertEquals(byLabel.Trace, 'checkout', 'trace name');
+  assertEquals(byLabel.User, 'user-7', 'user');
+  assertEquals(byLabel.Session, 'session-9', 'session');
+  assertEquals(byLabel.Tags, 'beta, eu', 'tags');
+  assertEquals(byLabel.Environment, 'staging', 'environment');
+  assertEquals(byLabel.Release, 'r42', 'release');
+  assertEquals(byLabel.Version, 'v3', 'version');
+  assertEquals(byLabel.Level, 'WARNING', 'level');
+  assertEquals(byLabel.Status, 'slow', 'status message');
+  assertEquals(getSpanMetadata([kv('langfuse.observation.level', 'DEFAULT')]).length, 0, 'the default level is not worth showing');
+  const alternatives = Object.fromEntries(getSpanMetadata([
+    kv('langfuse.user.id', 'u1'), kv('gen_ai.conversation.id', 'c1'), kv('langfuse.trace.tags', '["a","b"]'),
+  ]).map((m) => [m.label, m.value]));
+  assertEquals(alternatives.User, 'u1', 'langfuse.user.id');
+  assertEquals(alternatives.Session, 'c1', 'gen_ai.conversation.id');
+  assertEquals(alternatives.Tags, 'a, b', 'tags as a JSON string');
+  const aiSdk = Object.fromEntries(getSpanMetadata([
+    kv('ai.telemetry.metadata.userId', 'u2'), kv('ai.telemetry.metadata.sessionId', 's2'),
+  ]).map((m) => [m.label, m.value]));
+  assertEquals(aiSdk.User, 'u2', 'AI SDK telemetry metadata user');
+  assertEquals(aiSdk.Session, 's2', 'AI SDK telemetry metadata session');
+});
+
+describe('Traceloop entity spans', () => {
+  const workflow = [
+    kv('traceloop.span.kind', 'workflow'),
+    kv('traceloop.entity.name', 'joke_flow'),
+    kv('traceloop.entity.input', '{"args":["cats"],"kwargs":{}}'),
+    kv('traceloop.entity.output', '{"joke":"purr-fect"}'),
+  ];
+  const result = extractLlmSpanData(workflow, [], 'joke_flow.workflow');
+  assertEquals(getSpanKind(workflow), 'CHAIN', 'workflow is CHAIN');
+  assertEquals(result.framework, 'traceloop', 'framework');
+  assertEquals(result.inputMessages[0].content, '{"args":["cats"],"kwargs":{}}', 'entity input');
+  assertEquals(result.outputMessages[0].content, '{"joke":"purr-fect"}', 'entity output');
+  assertEquals(result.isLlm, false, 'not a model call');
+  assert(isLlmSpan(workflow) === false, 'not an LLM span');
+  assertEquals(result.model, 'unknown', 'the span name is not shown as a model');
+  assertEquals(getSpanKind([kv('traceloop.span.kind', 'task')]), 'CHAIN', 'task is CHAIN');
+  assertEquals(getSpanKind([kv('traceloop.span.kind', 'agent')]), 'AGENT', 'agent');
+  assertEquals(getSpanKind([kv('traceloop.span.kind', 'tool')]), 'TOOL', 'tool');
+  assertEquals(getSpanKind([kv('traceloop.span.kind', 'unknown')]), undefined, 'unknown has no kind');
+  const tool = extractLlmSpanData([kv('traceloop.span.kind', 'tool'), kv('traceloop.entity.name', 'search'), kv('traceloop.entity.input', '{"q":"x"}'), kv('traceloop.entity.output', '"found"')], []);
+  assertEquals(tool.inputMessages[0].toolCalls?.[0].name, 'search', 'tool name from traceloop.entity.name');
+  const llm = extractLlmSpanData([kv('gen_ai.system', 'openai'), kv('gen_ai.request.model', 'm'), kv('traceloop.workflow.name', 'wf'), kv('traceloop.entity.name', 'chat')], []);
+  assertEquals(llm.framework, undefined, 'OpenLLMetry model spans keep the OTel GenAI presentation');
+});
+
+describe('MLflow spans', () => {
+  const chat = [
+    kv('mlflow.spanType', '"CHAT_MODEL"'),
+    kv('mlflow.spanInputs', JSON.stringify({ messages: [{ role: 'user', content: 'Hi' }] })),
+    kv('mlflow.spanOutputs', JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'Hello' } }] })),
+  ];
+  const result = extractLlmSpanData(chat, []);
+  assertEquals(result.framework, 'mlflow', 'framework');
+  assertEquals(getSpanKind(chat), 'LLM', 'CHAT_MODEL is LLM');
+  assertEquals(result.inputMessages[0].content, 'Hi', 'messages in the inputs');
+  assertEquals(result.outputMessages[0].content, 'Hello', 'choices in the outputs');
+  assertEquals(result.isLlm, true, 'an LLM span is a model call');
+  const kind = (type: string) => getSpanKind([kv('mlflow.spanType', type)]);
+  assertEquals(kind('"LLM"'), 'LLM', 'LLM with JSON quotes');
+  assertEquals(kind('LLM'), 'LLM', 'LLM without quotes');
+  assertEquals(kind('"CHAIN"'), 'CHAIN', 'CHAIN');
+  assertEquals(kind('"AGENT"'), 'AGENT', 'AGENT');
+  assertEquals(kind('"TOOL"'), 'TOOL', 'TOOL');
+  assertEquals(kind('"RETRIEVER"'), 'RETRIEVER', 'RETRIEVER');
+  assertEquals(kind('"EMBEDDING"'), 'EMBEDDING', 'EMBEDDING');
+  assertEquals(kind('"RERANKER"'), 'RERANKER', 'RERANKER');
+  assertEquals(kind('"PARSER"'), 'PARSER', 'other types keep their name');
+  assertEquals(kind('"UNKNOWN"'), undefined, 'UNKNOWN has no kind');
+  const chain = extractLlmSpanData([kv('mlflow.spanType', '"CHAIN"'), kv('mlflow.spanInputs', '{"question":"why"}'), kv('mlflow.spanOutputs', '"because"')], []);
+  assertEquals(chain.isLlm, false, 'a chain is not a model call');
+  assertEquals(chain.inputMessages[0].content, '{"question":"why"}', 'non-message inputs are shown as text');
+  assertEquals(chain.outputMessages[0].content, 'because', 'string outputs are shown as text');
+});
+
+describe('gen_ai.operation.name values without a kind of their own', () => {
+  const kind = (operation: string) => getSpanKind([kv('gen_ai.operation.name', operation)]);
+  assertEquals(kind('completion'), 'LLM', 'completion');
+  assertEquals(kind('retrieval'), 'RETRIEVER', 'retrieval');
+  assertEquals(kind('rerank'), 'RERANKER', 'rerank');
+  assertEquals(kind('invoke_workflow'), 'CHAIN', 'invoke_workflow');
+  assertEquals(kind('something_new'), 'SOMETHING_NEW', 'unknown values keep the uppercase fallback');
 });
 
 // ---------------------------------------------------------------------------
