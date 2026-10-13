@@ -25,9 +25,14 @@ It does not need an extra backend or its own configuration.
 
 The plugin recognises LLM spans written with these conventions:
 
-- **OpenInference** (for example Arize Phoenix and Traceloop instrumentation)
-- **OpenTelemetry GenAI** semantic conventions (`gen_ai.*`)
-- **Vertex AI** (GCP Vertex AI Agent Builder)
+- **OpenInference** (for example Arize Phoenix instrumentation)
+- **OpenTelemetry GenAI** semantic conventions (`gen_ai.*` attributes and span events)
+- **Vertex AI** (GCP Vertex AI Agent Builder) and **Google ADK** (`gcp.vertex.agent.*`)
+- **Vercel AI SDK** (`ai.*`)
+- **Pydantic AI** and **Logfire**
+- **Langfuse SDK** (`langfuse.*`)
+- **Traceloop / OpenLLMetry** (`traceloop.*`)
+- **MLflow** (`mlflow.*`)
 
 Known limitation: the menu entry uses the `ai-sparkle` icon, which exists only in Grafana 12.0 and newer.
 On Grafana 11.x the entry appears without an icon; the plugin works the same otherwise.

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.4 - 2026-10-13
+
+### Features
+- OpenTelemetry GenAI span events are read: `gen_ai.system.message`, `gen_ai.user.message`, `gen_ai.assistant.message`, `gen_ai.tool.message`, `gen_ai.choice` and `gen_ai.client.inference.operation.details`. `gen_ai.system_instructions` is shown as the system message when the input has none.
+- OpenTelemetry GenAI tool spans show `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result` as tool call and tool result cards. Spans with `gen_ai.tool.name` or `gen_ai.tool.call.id` are tools even without an operation name.
+- Vercel AI SDK spans (`ai.*`) show their prompt, response, tool calls, usage and settings for AI SDK 4 and 5, and are named like `weather-agent:ai.generateText`.
+- Pydantic AI and Logfire, the Langfuse SDK (`langfuse.*`), Traceloop / OpenLLMetry (`traceloop.*`) and MLflow (`mlflow.*`) spans show their span kind, input and output.
+- Cached, reasoning and audio token counts are shown. Cached input is priced at the model's cache price where one is known, and reported costs are also read from `gen_ai.usage.cost` and `llm.cost.total`.
+- The span detail header shows trace-level metadata when the trace provides it: user, session, tags, trace name, environment, release, version, level and status message.
+- Span rows use the same name as the detail title, and the span filter matches that name.
+- Agent spans from Pydantic AI (`agent_name`) and Traceloop (`traceloop.entity.name`) are named after their agent.
+- Array and key-value attribute values keep their structure, and the instrumentation scope is read, so messages sent as structured OTLP values are shown.
+
+### Bug Fixes
+- Agent and workflow spans (`invoke_agent`, `agent_step`, Vercel AI SDK wrapper spans and Pydantic AI agent runs) no longer double the trace's token and cost totals, and tool spans no longer count as LLM calls.
+- `gen_ai.assistant.message` events appear in the input history instead of as the model's answer.
+- The GenAI operations `completion`, `retrieval` and `invoke_workflow` show as LLM, RETRIEVER and CHAIN spans instead of their raw names.
+
 ## 0.1.3 - 2026-10-13
 
 ### Features
