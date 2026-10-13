@@ -5,17 +5,33 @@ import { GrafanaTheme2 } from '@grafana/data';
 import { Icon, useStyles2, useTheme2 } from '@grafana/ui';
 
 import { AgentGraph as AgentGraphModel, GraphEdge, GraphNode, START_NODE_ID, getNodeClickTarget, indexGraphSpans } from '../utils/agentGraph';
-import { Box, NODE_HEIGHT, getDefaultScale, getFitScale, getGraphInView, getInitialScroll, getRevealScroll, layoutAgentGraph, placeAgentGraph } from '../utils/agentGraphLayout';
+import {
+  Anchor,
+  Box,
+  NODE_HEIGHT,
+  clampZoom,
+  getAnchor,
+  getAnchoredScroll,
+  getDefaultScale,
+  getFitScale,
+  getGraphInView,
+  getInitialScroll,
+  getRevealScroll,
+  getWheelZoomScale,
+  getZoomRange,
+  layoutAgentGraph,
+  placeAgentGraph,
+} from '../utils/agentGraphLayout';
 import { getAgentColors, pickAgentColor } from '../utils/agentColors';
 import { formatDuration } from '../utils/formatUtils';
 import { getSpanKindColor } from '../utils/llmUtils';
 import { KindIcon, getKindLabel } from './KindIcon';
 
-const MIN_ZOOM = 0.25;
-const MAX_ZOOM = 2;
 const ZOOM_STEP = 1.25;
 /** How far the pointer moves before a press on the graph turns into a pan instead of a click. */
 const DRAG_THRESHOLD = 4;
+/** A wheel event within this many milliseconds of the last, at the same pointer position, zooms around the same point. */
+const WHEEL_ANCHOR_MS = 400;
 const ARROW_HEAD = 'M 0 0 L 10 5 L 0 10 z';
 
 const getStyles = (theme: GrafanaTheme2) => ({
@@ -42,11 +58,19 @@ const getStyles = (theme: GrafanaTheme2) => ({
     textAlign: 'center',
     color: theme.colors.text.secondary,
   }),
+  // The scrolling view sits in a frame so that the controls stay in the corner while the graph scrolls under them.
+  frame: css({
+    position: 'relative',
+    flex: 1,
+    minHeight: 0,
+    display: 'flex',
+    flexDirection: 'column',
+  }),
   zoom: css({
-    position: 'sticky',
+    position: 'absolute',
     top: theme.spacing(1),
-    float: 'right',
-    marginRight: theme.spacing(1),
+    // Clear of the vertical scrollbar.
+    right: theme.spacing(2.5),
     zIndex: 1,
     display: 'flex',
     gap: theme.spacing(0.5),
@@ -280,24 +304,37 @@ export function AgentGraph({ graph, selectedSpanId, onSelectSpan }: AgentGraphPr
     }
   }, [selectedNodeId, placed, container, ready]);
 
-  // A zoom keeps the middle of the view where it is; Fit shows the whole graph from its top left corner.
-  const centreRef = useRef<{ x: number; y: number } | null>(null);
+  // A zoom keeps one point of the graph where it is in the view: the one under the pointer for the wheel, the middle of
+  // the view for the buttons. Fit shows the whole graph from its top left corner.
+  const anchorRef = useRef<Anchor | null>(null);
+  // The scale that wheel events asked for but that is not drawn yet, so that events within one frame add up.
+  const pendingScaleRef = useRef<number | null>(null);
+  // Once the reader has zoomed past the whole graph, a screen of empty space after it lets a zoom hold the point under the
+  // pointer even near the far edges of the graph.
+  const slack = typeof zoom === 'number' && scale > getFitScale(placed, size) ? size : { width: 0, height: 0 };
+  const lastWheelRef = useRef<{ x: number; y: number; at: number; anchor: Anchor } | null>(null);
+  const zoomRangeRef = useRef(getZoomRange(placed, size));
+  zoomRangeRef.current = getZoomRange(placed, size);
   const zoomTo = (next: number | 'fit') => {
-    if (container) {
-      centreRef.current = { x: (container.scrollLeft + container.clientWidth / 2) / scale, y: (container.scrollTop + container.clientHeight / 2) / scale };
+    if (container && (next === 'fit' ? getFitScale(placed, size) : next) !== scale) {
+      anchorRef.current = getAnchor(
+        { left: container.scrollLeft, top: container.scrollTop },
+        { x: container.clientWidth / 2, y: container.clientHeight / 2 },
+        scale
+      );
     }
     setZoom(next);
   };
   useLayoutEffect(() => {
-    const centre = centreRef.current;
-    centreRef.current = null;
-    if (container && centre) {
-      container.scrollTo({ left: centre.x * scale - container.clientWidth / 2, top: centre.y * scale - container.clientHeight / 2 });
+    const anchor = anchorRef.current;
+    anchorRef.current = null;
+    pendingScaleRef.current = null;
+    if (container && anchor) {
+      container.scrollTo(getAnchoredScroll(anchor, scale));
     }
   }, [scale, container]);
 
-  // Drag to pan. A press that moves less than DRAG_THRESHOLD is still a click on a node. A mouse wheel scrolls
-  // sideways when the graph is wider than the view and not taller.
+  // Drag to pan. A press that moves less than DRAG_THRESHOLD is still a click on a node.
   useEffect(() => {
     if (!container) {
       return undefined;
@@ -305,7 +342,7 @@ export function AgentGraph({ graph, selectedSpanId, onSelectSpan }: AgentGraphPr
     let press: { x: number; y: number; left: number; top: number; id: number; dragging: boolean } | null = null;
     let swallowClick = false;
     const onDown = (e: PointerEvent) => {
-      if (e.button !== 0 || e.pointerType === 'touch' || (e.target as Element).closest('[data-graph-controls]')) {
+      if (e.button !== 0 || e.pointerType === 'touch') {
         return;
       }
       press = { x: e.clientX, y: e.clientY, left: container.scrollLeft, top: container.scrollTop, id: e.pointerId, dragging: false };
@@ -339,13 +376,33 @@ export function AgentGraph({ graph, selectedSpanId, onSelectSpan }: AgentGraphPr
         e.preventDefault();
       }
     };
+    // The wheel and the trackpad (two-finger scroll and pinch) zoom around the pointer. Pinch arrives as wheel events with
+    // ctrlKey, which the browser would use to zoom the page.
     const onWheel = (e: WheelEvent) => {
-      const sideways = container.scrollWidth > container.clientWidth && container.scrollHeight <= container.clientHeight;
-      if (sideways && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
-        e.preventDefault();
-        e.stopPropagation();
-        container.scrollLeft += e.deltaY;
+      e.preventDefault();
+      e.stopPropagation();
+      const current = scaleRef.current;
+      const next = getWheelZoomScale(pendingScaleRef.current ?? current, e.deltaY, e.deltaMode, e.ctrlKey, zoomRangeRef.current);
+      if (next === (pendingScaleRef.current ?? current)) {
+        return;
       }
+      // While the pointer stays put, the wheel keeps zooming around the same graph point, so that scroll positions rounded
+      // to whole pixels do not add up to a drift.
+      let last = lastWheelRef.current;
+      if (!last || last.x !== e.clientX || last.y !== e.clientY || e.timeStamp - last.at > WHEEL_ANCHOR_MS) {
+        const rect = container.getBoundingClientRect();
+        last = {
+          x: e.clientX,
+          y: e.clientY,
+          at: e.timeStamp,
+          anchor: getAnchor({ left: container.scrollLeft, top: container.scrollTop }, { x: e.clientX - rect.left, y: e.clientY - rect.top }, current),
+        };
+      }
+      last.at = e.timeStamp;
+      lastWheelRef.current = last;
+      anchorRef.current = last.anchor;
+      pendingScaleRef.current = next;
+      setZoom(next);
     };
     container.addEventListener('pointerdown', onDown);
     container.addEventListener('pointermove', onMove);
@@ -448,41 +505,45 @@ export function AgentGraph({ graph, selectedSpanId, onSelectSpan }: AgentGraphPr
   };
 
   return (
-    <div className={panning ? `${styles.root} ${styles.panning}` : styles.root} ref={setContainer} data-testid="agent-graph" data-scale={scale.toFixed(3)} role="region" aria-label="Agent graph">
-      <div className={styles.zoom} data-graph-controls>
-        <button className={styles.zoomButton} onClick={() => zoomTo(Math.min(scale, Math.max(MIN_ZOOM, scale / ZOOM_STEP)))} aria-label="Zoom out" title="Zoom out">−</button>
+    <div className={styles.frame}>
+      <div className={styles.zoom} data-testid="agent-graph-controls">
+        <button className={styles.zoomButton} onClick={() => zoomTo(clampZoom(scale / ZOOM_STEP, scale, zoomRangeRef.current))} aria-label="Zoom out" title="Zoom out">−</button>
         <span>{Math.round(scale * 100)}%</span>
-        <button className={styles.zoomButton} onClick={() => zoomTo(Math.min(MAX_ZOOM, scale * ZOOM_STEP))} aria-label="Zoom in" title="Zoom in">+</button>
+        <button className={styles.zoomButton} onClick={() => zoomTo(clampZoom(scale * ZOOM_STEP, scale, zoomRangeRef.current))} aria-label="Zoom in" title="Zoom in">+</button>
         <button className={styles.zoomButton} onClick={() => zoomTo('fit')} aria-label="Fit graph to view" title="Show the whole graph">Fit</button>
       </div>
-      <svg width={placed.width * scale} height={placed.height * scale} viewBox={`0 0 ${placed.width} ${placed.height}`} role="group" aria-label="Call graph" style={{ display: 'block' }}>
-        <defs>
-          {Object.entries(stateColors).map(([state, color]) => (
-            <marker key={state} id={`agent-graph-arrow-${state}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-              <path d={ARROW_HEAD} fill={color} />
-            </marker>
-          ))}
-        </defs>
-        {visibleEdges.map(({ edge, path, label }) => {
-          const state = edgeState(edge);
-          const color = stateColors[state];
-          return (
-            <g key={`${edge.from}>${edge.to}`} data-testid="agent-graph-edge" data-from={edge.from} data-to={edge.to} data-active={isActive(edge)}>
-              <title>{`×${edge.count}, ${formatDuration(edge.totalMs)}${edge.errorCount > 0 ? `, ${edge.errorCount} failed` : ''}`}</title>
-              <path d={path} fill="none" stroke={color} strokeWidth={state === 'active' ? 2 : 1.5} markerEnd={`url(#agent-graph-arrow-${state})`} />
-              {edge.count > 1 && (
-                <>
-                  <rect x={label.x - 15} y={label.y - 9} width={30} height={18} rx={9} fill={theme.colors.background.primary} stroke={color} strokeWidth={1} />
-                  <text x={label.x} y={label.y + 4} textAnchor="middle" fontSize={11} fill={edge.errorCount > 0 ? errorColor : theme.colors.text.secondary}>
-                    {`×${edge.count}`}
-                  </text>
-                </>
-              )}
-            </g>
-          );
-        })}
-        {visibleNodeIds.map((id) => renderNode(nodeById.get(id)!, placed.boxes.get(id)!))}
-      </svg>
+      <div className={panning ? `${styles.root} ${styles.panning}` : styles.root} ref={setContainer} data-testid="agent-graph" data-scale={scale.toFixed(3)} role="region" aria-label="Agent graph">
+        <div style={{ width: placed.width * scale + slack.width, height: placed.height * scale + slack.height }}>
+          <svg width={placed.width * scale} height={placed.height * scale} viewBox={`0 0 ${placed.width} ${placed.height}`} role="group" aria-label="Call graph" style={{ display: 'block' }}>
+            <defs>
+              {Object.entries(stateColors).map(([state, color]) => (
+                <marker key={state} id={`agent-graph-arrow-${state}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+                  <path d={ARROW_HEAD} fill={color} />
+                </marker>
+              ))}
+            </defs>
+            {visibleEdges.map(({ edge, path, label }) => {
+              const state = edgeState(edge);
+              const color = stateColors[state];
+              return (
+                <g key={`${edge.from}>${edge.to}`} data-testid="agent-graph-edge" data-from={edge.from} data-to={edge.to} data-active={isActive(edge)}>
+                  <title>{`×${edge.count}, ${formatDuration(edge.totalMs)}${edge.errorCount > 0 ? `, ${edge.errorCount} failed` : ''}`}</title>
+                  <path d={path} fill="none" stroke={color} strokeWidth={state === 'active' ? 2 : 1.5} markerEnd={`url(#agent-graph-arrow-${state})`} />
+                  {edge.count > 1 && (
+                    <>
+                      <rect x={label.x - 15} y={label.y - 9} width={30} height={18} rx={9} fill={theme.colors.background.primary} stroke={color} strokeWidth={1} />
+                      <text x={label.x} y={label.y + 4} textAnchor="middle" fontSize={11} fill={edge.errorCount > 0 ? errorColor : theme.colors.text.secondary}>
+                        {`×${edge.count}`}
+                      </text>
+                    </>
+                  )}
+                </g>
+              );
+            })}
+            {visibleNodeIds.map((id) => renderNode(nodeById.get(id)!, placed.boxes.get(id)!))}
+          </svg>
+        </div>
+      </div>
     </div>
   );
 }

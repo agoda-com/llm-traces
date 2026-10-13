@@ -295,3 +295,61 @@ export function getRevealScroll(target: Box, scale: number, view: Size, scroll: 
   const top = axis(target.y, target.height, scroll.top, view.height, content.height);
   return left === scroll.left && top === scroll.top ? undefined : { left, top };
 }
+
+// ---- Zoom ----
+
+export const MAX_ZOOM = 2;
+const SMALLEST_ZOOM = 0.3;
+/** Pixels in a line and in a page of wheel scrolling, for the browsers that report wheel deltas in those. */
+const LINE_PX = 32;
+const PAGE_PX = 800;
+/** Zoom per pixel of wheel delta: about 22% for a mouse wheel notch of 100px. A pinch reports far smaller deltas. */
+const WHEEL_ZOOM_PER_PX = 0.002;
+const PINCH_ZOOM_PER_PX = 0.01;
+
+export interface ZoomRange {
+  min: number;
+  max: number;
+}
+
+/** The smallest zoom shows the whole graph, but not smaller than 30%, which is the most a huge graph is shrunk to. */
+export function getZoomRange(content: Size, view: Size): ZoomRange {
+  return { min: Math.max(getFitScale(content, view), SMALLEST_ZOOM), max: MAX_ZOOM };
+}
+
+/**
+ * Keeps `next` inside the range. A scale already below the range, e.g. after Fit on a huge graph, can stay where it is
+ * but is not pushed up by zooming out.
+ */
+export function clampZoom(next: number, current: number, range: ZoomRange): number {
+  return Math.min(range.max, Math.max(Math.min(range.min, current), next));
+}
+
+/** A wheel delta in pixels, whatever unit the browser reports it in (WheelEvent.deltaMode 0, 1 or 2). */
+export function normalizeWheelDelta(delta: number, deltaMode: number): number {
+  return deltaMode === 1 ? delta * LINE_PX : deltaMode === 2 ? delta * PAGE_PX : delta;
+}
+
+/** The scale after a wheel event: scrolling up zooms in, and equal deltas zoom by equal factors. */
+export function getWheelZoomScale(scale: number, deltaY: number, deltaMode: number, pinch: boolean, range: ZoomRange): number {
+  const perPx = pinch ? PINCH_ZOOM_PER_PX : WHEEL_ZOOM_PER_PX;
+  return clampZoom(scale * Math.exp(-normalizeWheelDelta(deltaY, deltaMode) * perPx), scale, range);
+}
+
+/** A point of the graph (in graph units) and where it sits in the view (in pixels). */
+export interface Anchor {
+  x: number;
+  y: number;
+  px: number;
+  py: number;
+}
+
+/** The graph point under `pointer`, a position in the view, for a view scrolled to `scroll` at `scale`. */
+export function getAnchor(scroll: ScrollPosition, pointer: Point, scale: number): Anchor {
+  return { x: (scroll.left + pointer.x) / scale, y: (scroll.top + pointer.y) / scale, px: pointer.x, py: pointer.y };
+}
+
+/** The scroll position that puts the anchor back under its pointer position once the graph is drawn at `scale`. */
+export function getAnchoredScroll(anchor: Anchor, scale: number): ScrollPosition {
+  return { left: anchor.x * scale - anchor.px, top: anchor.y * scale - anchor.py };
+}

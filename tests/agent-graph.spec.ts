@@ -540,7 +540,7 @@ test.describe('Readable scale and panning', () => {
     expect(svg.x + svg.width).toBeLessThanOrEqual(view.x + view.width + 0.5);
     expect(svg.y + svg.height).toBeLessThanOrEqual(view.y + view.height + 0.5);
 
-    const controls = page.getByTestId('agent-graph');
+    const controls = page.getByTestId('agent-graph-controls');
     await controls.getByRole('button', { name: 'Zoom in' }).click();
     expect(await scaleOf(page)).toBeCloseTo(fitted * 1.25, 2);
     await controls.getByRole('button', { name: 'Zoom in' }).click();
@@ -567,16 +567,6 @@ test.describe('Readable scale and panning', () => {
     await expect(page.getByTestId('span-header-raw-name')).not.toContainText('trip_coordinator');
   });
 
-  test('the mouse wheel scrolls a graph that is wider than the view sideways', async ({ page }) => {
-    await page.setViewportSize({ width: 800, height: 900 });
-    await openTrace(page, ADK_GRAPH);
-    await page.getByTestId('agent-graph').evaluate((graph) => { graph.scrollLeft = 0; });
-    const view = await box(page.getByTestId('agent-graph'));
-    await page.mouse.move(view.x + view.width / 2, view.y + view.height / 2);
-    await page.mouse.wheel(0, 120);
-    await expect.poll(async () => (await scrollOf(page)).left).toBeGreaterThan(50);
-  });
-
   test('selecting a span in the tree pans to its node when the node is out of view', async ({ page }) => {
     await page.setViewportSize({ width: 800, height: 900 });
     await openTrace(page, ADK_GRAPH);
@@ -596,6 +586,141 @@ test.describe('Readable scale and panning', () => {
     await page.locator('[data-testid^="span-row-"]').filter({ has: page.getByTestId('span-operation-name').getByText('generate', { exact: true }) }).first().click();
     await expect(page.locator('[data-testid="agent-graph-node"][aria-pressed="true"]')).toHaveCount(1);
     expect((await scrollOf(page)).left).toBeCloseTo(before.left, 0);
+  });
+});
+
+test.describe('Zooming with the wheel and the trackpad', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.setViewportSize({ width: 800, height: 900 });
+    await openTrace(page, ADK_GRAPH);
+  });
+
+  const percent = (page: Page) => page.getByTestId('agent-graph-controls').getByText(/^\d+%$/);
+  const centreOf = async (locator: Locator) => {
+    const rect = await box(locator);
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  };
+  const wheelAt = async (page: Page, at: { x: number; y: number }, deltaY: number, times = 1) => {
+    await page.mouse.move(at.x, at.y);
+    for (let i = 0; i < times; i++) {
+      await page.mouse.wheel(0, deltaY);
+    }
+  };
+
+  test('scrolling up over the graph zooms in and scrolling down zooms out, and the percentage follows', async ({ page }) => {
+    const opened = await scaleOf(page);
+    await expect(percent(page)).toHaveText(`${Math.round(opened * 100)}%`);
+    const at = await centreOf(graphNode(page, 'fare_agent'));
+    await wheelAt(page, at, -100, 3);
+    await expect.poll(() => scaleOf(page)).toBeGreaterThan(opened * 1.3);
+    const zoomedIn = await scaleOf(page);
+    await expect(percent(page)).toHaveText(`${Math.round(zoomedIn * 100)}%`);
+
+    await wheelAt(page, await centreOf(graphNode(page, 'fare_agent')), 100, 2);
+    await expect.poll(() => scaleOf(page)).toBeLessThan(zoomedIn * 0.8);
+    expect(await scaleOf(page)).toBeGreaterThan(opened * 0.9);
+  });
+
+  test('the node under the pointer stays under it while zooming', async ({ page }) => {
+    const node = graphNode(page, 'fare_agent');
+    const rect = await box(node);
+    const at = { x: rect.x + rect.width * 0.7, y: rect.y + rect.height * 0.6 };
+    await wheelAt(page, at, -100, 4);
+    await expect.poll(async () => (await box(node)).width).toBeGreaterThan(rect.width * 1.5);
+    const after = await box(node);
+    expect(Math.abs(after.x + after.width * 0.7 - at.x), 'horizontal offset of the point under the pointer').toBeLessThan(4);
+    expect(Math.abs(after.y + after.height * 0.6 - at.y), 'vertical offset of the point under the pointer').toBeLessThan(4);
+
+    await wheelAt(page, at, 100, 2);
+    await expect.poll(async () => (await box(node)).width).toBeLessThan(after.width * 0.85);
+    const back = await box(node);
+    expect(Math.abs(back.x + back.width * 0.7 - at.x)).toBeLessThan(4);
+    expect(Math.abs(back.y + back.height * 0.6 - at.y)).toBeLessThan(4);
+  });
+
+  test('a trackpad pinch (wheel events with ctrlKey) zooms the graph and the browser does not zoom the page', async ({ page }) => {
+    const opened = await scaleOf(page);
+    const at = await centreOf(graphNode(page, 'fare_agent'));
+    const prevented = await page.getByTestId('agent-graph').evaluate((graph, point) => {
+      const event = new WheelEvent('wheel', { deltaY: -20, ctrlKey: true, clientX: point.x, clientY: point.y, bubbles: true, cancelable: true });
+      graph.dispatchEvent(event);
+      return event.defaultPrevented;
+    }, at);
+    expect(prevented, 'the page zoom is cancelled').toBe(true);
+    await expect.poll(() => scaleOf(page)).toBeGreaterThan(opened * 1.15);
+    const zoomed = await scaleOf(page);
+    await page.getByTestId('agent-graph').evaluate((graph, point) => {
+      graph.dispatchEvent(new WheelEvent('wheel', { deltaY: 20, ctrlKey: true, clientX: point.x, clientY: point.y, bubbles: true, cancelable: true }));
+    }, at);
+    await expect.poll(() => scaleOf(page)).toBeLessThan(zoomed);
+  });
+
+  test('line-based wheel deltas zoom like pixel ones', async ({ page }) => {
+    const opened = await scaleOf(page);
+    const at = await centreOf(graphNode(page, 'fare_agent'));
+    await page.getByTestId('agent-graph').evaluate((graph, point) => {
+      graph.dispatchEvent(new WheelEvent('wheel', { deltaY: -3, deltaMode: 1, clientX: point.x, clientY: point.y, bubbles: true, cancelable: true }));
+    }, at);
+    await expect.poll(() => scaleOf(page)).toBeCloseTo(Math.min(2, opened * Math.exp(0.192)), 2);
+  });
+
+  test('the page and the span list do not scroll while the wheel is over the graph', async ({ page }) => {
+    const before = await page.evaluate(() => ({ y: window.scrollY, list: document.querySelector('[data-testid="span-list-pane"]')!.scrollTop }));
+    expect(before.y, 'the page is scrolled to the trace to begin with').toBeGreaterThan(0);
+    const at = await centreOf(graphNode(page, 'fare_agent'));
+    await wheelAt(page, at, 100, 6);
+    await wheelAt(page, at, -100, 6);
+    await page.mouse.wheel(0, 400);
+    const after = await page.evaluate(() => ({ y: window.scrollY, list: document.querySelector('[data-testid="span-list-pane"]')!.scrollTop }));
+    expect(after).toEqual(before);
+  });
+
+  test('wheel zoom stops at the whole graph in view and at 200%, and may go below the 80% the graph opens at', async ({ page }) => {
+    expect(await scaleOf(page)).toBeCloseTo(0.8, 2);
+    const at = await centreOf(graphNode(page, 'fare_agent'));
+    await wheelAt(page, at, 100, 12);
+    await expect.poll(() => scaleOf(page)).toBeLessThan(0.8);
+    const smallest = await scaleOf(page);
+    await wheelAt(page, at, 100, 4);
+    expect(await scaleOf(page), 'zooming out stops where the whole graph is in view').toBeCloseTo(smallest, 3);
+    await page.getByTestId('agent-graph-controls').getByRole('button', { name: 'Fit graph to view' }).click();
+    expect(await scaleOf(page)).toBeCloseTo(smallest, 3);
+
+    await wheelAt(page, await centreOf(graphNode(page, 'fare_agent')), -100, 20);
+    await expect.poll(() => scaleOf(page)).toBeCloseTo(2, 3);
+    await expect(percent(page)).toHaveText('200%');
+  });
+
+  test('the buttons continue from the scale the wheel left', async ({ page }) => {
+    const at = await centreOf(graphNode(page, 'fare_agent'));
+    await wheelAt(page, at, -100, 2);
+    await expect.poll(() => scaleOf(page)).toBeGreaterThan(1);
+    const wheeled = await scaleOf(page);
+    await page.getByTestId('agent-graph-controls').getByRole('button', { name: 'Zoom in' }).click();
+    expect(await scaleOf(page)).toBeCloseTo(Math.min(2, wheeled * 1.25), 2);
+  });
+
+  test('a drag still pans and a click still selects a node', async ({ page }) => {
+    await wheelAt(page, await centreOf(graphNode(page, 'fare_agent')), -100, 3);
+    await expect.poll(() => scaleOf(page)).toBeGreaterThan(1);
+    await page.getByTestId('agent-graph').evaluate((graph) => { graph.scrollLeft = 0; graph.scrollTop = 0; });
+    const view = await box(page.getByTestId('agent-graph'));
+    const x = view.x + view.width / 2;
+    const y = view.y + view.height - 20;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x - 80, y - 10, { steps: 6 });
+    await page.mouse.up();
+    expect((await scrollOf(page)).left).toBeGreaterThan(40);
+
+    const target = graphNode(page, 'room_agent');
+    await target.scrollIntoViewIfNeeded();
+    const rect = await box(target);
+    await page.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(rect.x + rect.width / 2 + 2, rect.y + rect.height / 2 + 1);
+    await page.mouse.up();
+    await expect(target).toHaveAttribute('aria-pressed', 'true');
   });
 });
 

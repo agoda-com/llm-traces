@@ -3,7 +3,7 @@
 
 import { buildAgentGraph, getAgentGraph, getNodeClickTarget, indexGraphSpans, START_NODE_ID } from '../src/utils/agentGraph.ts';
 import type { AgentGraph } from '../src/utils/agentGraph.ts';
-import { getDefaultScale, getFitScale, getInitialScroll, getGraphInView, getRevealScroll, layoutAgentGraph, MAX_ROWS, placeAgentGraph, READABLE_SCALE } from '../src/utils/agentGraphLayout.ts';
+import { clampZoom, getAnchor, getAnchoredScroll, getDefaultScale, getFitScale, getInitialScroll, getGraphInView, getRevealScroll, getWheelZoomScale, getZoomRange, layoutAgentGraph, MAX_ROWS, MAX_ZOOM, normalizeWheelDelta, placeAgentGraph, READABLE_SCALE } from '../src/utils/agentGraphLayout.ts';
 import type { PluginSpan } from '../src/utils/tempoClient.ts';
 
 let passed = 0;
@@ -352,6 +352,49 @@ describe('scale and scroll position of the drawn graph', () => {
   assertEquals(getRevealScroll(far, 1, view, { left: 1900, top: 0 }, wide), undefined, 'including when the scroll position is part way');
   assertEquals(getRevealScroll(near, 1, view, { left: 400, top: 0 }, wide), { left: 34, top: 0 }, 'a node scrolled out to the left is brought back');
   assertEquals(getRevealScroll({ x: 250, y: 700, width: 168, height: 42 }, 0.5, view, { left: 0, top: 0 }, wide), { left: 0, top: 100 }, 'the scale is applied first: this node sits at y 350 on screen, past a 300px view, and the scroll stops at the end of the graph');
+});
+
+describe('zooming with the wheel', () => {
+  const content = { width: 1000, height: 400 };
+  const range = getZoomRange(content, { width: 504, height: 1000 });
+  assertEquals(range.min, 0.5, 'the smallest zoom is the scale that fits the whole graph');
+  assertEquals(range.max, 2, 'the largest zoom is 200%');
+  assertEquals(MAX_ZOOM, 2, 'and is exported');
+  assertEquals(getZoomRange({ width: 100000, height: 400 }, { width: 500, height: 500 }).min, 0.3, 'a huge graph does not zoom out below 30%');
+  assertEquals(getZoomRange(content, { width: 2000, height: 1000 }).min, 1, 'a graph that fits at 100% does not zoom out');
+
+  assertEquals(clampZoom(1.5, 1, range), 1.5, 'a zoom inside the range is kept');
+  assertEquals(clampZoom(3, 1, range), 2, 'a zoom above the range stops at the largest');
+  assertEquals(clampZoom(0.2, 1, range), 0.5, 'a zoom below the range stops at the fit scale');
+  assertEquals(clampZoom(0.04, 0.05, range), 0.05, 'a view already below the range (after Fit) does not jump up when zooming out');
+  assertEquals(clampZoom(0.2, 0.05, range), 0.2, 'but zooming in from there is allowed');
+
+  assertEquals(normalizeWheelDelta(100, 0), 100, 'pixel deltas are kept');
+  assertEquals(normalizeWheelDelta(3, 1), 96, 'a line delta becomes pixels: three lines are about one wheel notch');
+  assertEquals(normalizeWheelDelta(1, 2), 800, 'a page delta becomes pixels');
+  assertEquals(normalizeWheelDelta(-3, 1), -96, 'the sign is kept');
+
+  const near = (a: number, b: number) => Math.abs(a - b) < 1e-9;
+  assertEquals(near(getWheelZoomScale(1, -100, 0, false, range), Math.exp(0.2)), true, 'a wheel notch up zooms in by a step');
+  assertEquals(near(getWheelZoomScale(1, 100, 0, false, range), Math.exp(-0.2)), true, 'a notch down zooms out by the same factor');
+  assertEquals(near(getWheelZoomScale(1, -1, 0, false, range), Math.exp(0.002)), true, 'a one pixel trackpad delta zooms by a hair');
+  assertEquals(near(getWheelZoomScale(1, -3, 1, false, range), Math.exp(0.192)), true, 'line deltas are normalised before they zoom');
+  assertEquals(getWheelZoomScale(1, -10, 0, true, range) > getWheelZoomScale(1, -10, 0, false, range), true, 'a pinch (ctrl) delta zooms faster than the same wheel delta');
+  assertEquals(near(getWheelZoomScale(1, -10, 0, true, range), Math.exp(0.1)), true, 'by five times as much');
+  assertEquals(getWheelZoomScale(1.9, -500, 0, false, range), 2, 'wheel zoom stops at the largest');
+  assertEquals(getWheelZoomScale(0.7, 500, 0, false, range), 0.5, 'and at the fit scale');
+  assertEquals(getWheelZoomScale(0.8, 0, 0, false, range), 0.8, 'no delta, no zoom');
+
+  // The graph point under the pointer stays under the pointer.
+  const scroll = { left: 300, top: 40 };
+  const pointer = { x: 250, y: 120 };
+  const anchor = getAnchor(scroll, pointer, 0.8);
+  assertEquals(near(anchor.x, (300 + 250) / 0.8) && near(anchor.y, (40 + 120) / 0.8), true, 'the anchor is the graph point under the pointer');
+  for (const next of [0.5, 1, 1.7, 2]) {
+    const to = getAnchoredScroll(anchor, next);
+    assertEquals(near((to.left + pointer.x) / next, anchor.x) && near((to.top + pointer.y) / next, anchor.y), true, `at ${next} the same graph point is still under the pointer`);
+  }
+  assertEquals(getAnchoredScroll(anchor, 0.8), scroll, 'at the scale it was taken at, the scroll position is unchanged');
 });
 
 describe('calls', () => {
