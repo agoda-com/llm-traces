@@ -56,7 +56,11 @@ test.describe('30,000-span trace list', () => {
     await mockTrace(page, makeLargeTrace(30_000, 200, llmIndexes));
     await page.goto(PLUGIN_URL);
     await page.getByTestId(`trace-item-${LARGE_TRACE_ID}`).click();
+    // Playwright scrolls the item into view before it clicks, and Grafana 12.0 sometimes lays out the page so that the
+    // item starts below the fold. The window position after the click is the baseline for what the plugin does next.
+    const windowScrollY = await page.evaluate(() => window.scrollY);
     await expect(page.getByTestId('llm-span-detail')).toBeVisible({ timeout: 60_000 });
+    return windowScrollY;
   }
 
   const renderedIndexes = (page: Page) => page.locator('[data-testid^="span-row-"]').evaluateAll((rows) =>
@@ -77,14 +81,14 @@ test.describe('30,000-span trace list', () => {
   });
 
   test('scrolls an auto-selected span far down the list into view without moving the window', async ({ page }) => {
-    await openLargeTrace(page, [12_000]);
+    const windowScrollY = await openLargeTrace(page, [12_000]);
     const target = page.getByTestId(`span-row-${spanIdFor('lg', 12_000)}`);
     await expect(target).toBeVisible();
     const pane = (await page.getByTestId('span-list-pane').boundingBox())!;
     const box = (await target.boundingBox())!;
     expect(box.y).toBeGreaterThanOrEqual(pane.y);
     expect(box.y + box.height).toBeLessThanOrEqual(pane.y + pane.height + 1);
-    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+    expect(await page.evaluate(() => window.scrollY), 'the plugin leaves the window where the click left it').toBe(windowScrollY);
   });
 
   test('j and k select rows that were not rendered and scroll them into view', async ({ page }) => {
