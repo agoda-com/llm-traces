@@ -1334,13 +1334,29 @@ export function getSpanKind(tags: KeyValuePair[]): string | undefined {
   return undefined;
 }
 
+// OTel GenAI names agent spans "invoke_agent <name>" and "create_agent <name>".
+const AGENT_SPAN_NAME = /^(?:invoke|create)_agent\s+(\S.*?)\s*$/;
+
+function getNonBlankAttr(tags: KeyValuePair[], key: string): string | undefined {
+  const value = getAttr(tags, key)?.trim();
+  return value ? value : undefined;
+}
+
 /**
- * Returns the agent name across all supported conventions:
- *   - gen_ai.agent.name  (OTel GenAI spec + modern OpenInference ≥ 1.4)
- * Returns undefined when no agent name attribute is found.
+ * Returns the agent name across all supported conventions, first match wins:
+ *   - gen_ai.agent.name  (OTel GenAI spec + modern OpenInference >= 1.4)
+ *   - agent.name
+ *   - the <name> of a span name such as "invoke_agent <name>"
+ * Returns undefined when none of them is present.
  */
-export function getAgentName(tags: KeyValuePair[]): string | undefined {
-  return getAttr(tags, 'gen_ai.agent.name');
+export function getAgentName(tags: KeyValuePair[], spanName?: string): string | undefined {
+  return getNonBlankAttr(tags, 'gen_ai.agent.name')
+    ?? getNonBlankAttr(tags, 'agent.name')
+    ?? spanName?.match(AGENT_SPAN_NAME)?.[1];
+}
+
+export function getAgentDescription(tags: KeyValuePair[]): string | undefined {
+  return getNonBlankAttr(tags, 'gen_ai.agent.description');
 }
 
 export function getSpanKindColor(kind: string | undefined): string {

@@ -2,8 +2,11 @@ import React, { useMemo, useState } from 'react';
 import { useStyles2, useTheme2, Icon } from '@grafana/ui';
 import { getStyles } from './TraceDetail.styles';
 import { PluginSpan } from '../utils/tempoClient';
-import { decodeUnicodeEscapes, extractLlmSpanData, getLlmDisplayAttributeKeys } from '../utils/llmUtils';
+import { decodeUnicodeEscapes, extractLlmSpanData, getAgentDescription, getLlmDisplayAttributeKeys, getSpanKind } from '../utils/llmUtils';
+import { pickAgentColor } from '../utils/agentColors';
 import { formatDuration } from '../utils/formatUtils';
+import { KindIcon, getKindLabel } from './KindIcon';
+import { AgentLayer } from './SpanRow';
 import { LlmSpanDetail } from './LlmSpanDetail';
 
 /** Try to parse a string as JSON; if it succeeds, return pretty-printed JSON, else return original. */
@@ -42,14 +45,19 @@ function getSpanStatus(span: PluginSpan): { isError: boolean; message?: string }
 
 interface SpanDetailPanelProps {
   span: PluginSpan;
+  agentLayer: AgentLayer;
 }
 
-export function SpanDetailPanel({ span }: SpanDetailPanelProps) {
+export function SpanDetailPanel({ span, agentLayer }: SpanDetailPanelProps) {
   const styles = useStyles2(getStyles);
   const theme = useTheme2();
   const [expandStrings, setExpandStrings] = useState(false);
   const [expandedLlmAttributesForSpan, setExpandedLlmAttributesForSpan] = useState<string | null>(null);
   const spanStatus = getSpanStatus(span);
+  const kind = getSpanKind(span.tags);
+  const agent = agentLayer.byId.get(span.spanId);
+  const isAgentSpan = agent !== undefined && kind === 'AGENT';
+  const agentDescription = isAgentSpan ? getAgentDescription(span.tags) : undefined;
   const llmData = useMemo(
     () => extractLlmSpanData(span.tags, span.logs, span.operationName),
     [span.tags, span.logs, span.operationName]
@@ -74,7 +82,30 @@ export function SpanDetailPanel({ span }: SpanDetailPanelProps) {
   return (
     <div data-testid="span-detail-panel">
       <div className={styles.spanDetailHeader}>
-        <div className={styles.spanDetailTitle}>{span.operationName}</div>
+        <div className={styles.spanDetailTitle} data-testid="span-header-raw-name">{span.operationName}</div>
+        {(kind || agent) && (
+          <div className={styles.spanDetailAgentRow}>
+            {kind && (
+              <span className={styles.spanDetailAgentItem} data-testid="span-header-kind">
+                <KindIcon kind={kind} />
+                {getKindLabel(kind)}
+              </span>
+            )}
+            {agent && (
+              <span className={styles.spanDetailAgentItem}>
+                {!isAgentSpan && 'owned by'}
+                <span className={styles.spanDetailAgentDot} style={{ background: pickAgentColor(agentLayer.colors, agent.colorIndex).solid }} />
+                <span className={styles.spanDetailAgentName} data-testid="span-header-agent">{agent.name}</span>
+              </span>
+            )}
+            {isAgentSpan && agent.handoffFrom && (
+              <span className={styles.spanDetailAgentItem} data-testid="span-header-handoff">handed off from {agent.handoffFrom}</span>
+            )}
+          </div>
+        )}
+        {agentDescription && (
+          <div className={styles.spanDetailAgentDescription} data-testid="span-header-agent-description">{agentDescription}</div>
+        )}
         <div className={styles.spanDetailMeta}>
           <span>{span.serviceName}</span>
           <span>{formatDuration(span.durationMs)}</span>

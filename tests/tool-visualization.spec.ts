@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, Locator } from '@playwright/test';
 import {
   ADK_SEARCH_RESPONSE,
   ADK_TRACE_RESPONSE,
@@ -10,6 +10,42 @@ import {
 } from './fixtures/llm-trace';
 
 const PLUGIN_URL = '/a/agoda-llmtraces-app';
+
+interface VisibleRect {
+  left: number;
+  right: number;
+  width: number;
+  /** False when an ancestor cuts the element, so only a fragment of it shows. */
+  whole: boolean;
+}
+
+// An item that does not fit a row wraps onto a clipped second line: it keeps a layout box but nothing of it is painted.
+// This returns, for each element, the part that is painted (its box cut by every ancestor that clips overflow),
+// or null when nothing is painted.
+async function visibleRects(locator: Locator): Promise<Array<VisibleRect | null>> {
+  return locator.evaluateAll((elements) =>
+    elements.map((element) => {
+      const box = element.getBoundingClientRect();
+      let { left, right, top, bottom } = box;
+      for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+        const style = getComputedStyle(parent);
+        const clip = parent.getBoundingClientRect();
+        if (style.overflowX !== 'visible') {
+          left = Math.max(left, clip.left);
+          right = Math.min(right, clip.right);
+        }
+        if (style.overflowY !== 'visible') {
+          top = Math.max(top, clip.top);
+          bottom = Math.min(bottom, clip.bottom);
+        }
+      }
+      if (right - left <= 0.5 || bottom - top <= 0.5) {
+        return null;
+      }
+      return { left, right, width: right - left, whole: right - left >= box.width - 0.5 && bottom - top >= box.height - 0.5 };
+    })
+  );
+}
 
 test.describe('Tool visualization', () => {
   test.beforeEach(async ({ page, context }) => {
@@ -174,10 +210,14 @@ test.describe('Tool visualization', () => {
 
       const pane = page.getByTestId('span-list-pane');
       const row = page.getByTestId('span-row-toolspan00000001');
-      const service = await row.getByText('tool-service', { exact: true }).boundingBox();
+      const [service] = await visibleRects(row.getByText('tool-service', { exact: true }));
       const name = await row.getByTitle('ChatCompletion', { exact: true }).boundingBox();
       const duration = await row.getByText('2.20s', { exact: true }).boundingBox();
-      expect(service!.x + service!.width, 'service name must end before the span name').toBeLessThanOrEqual(name!.x + 1);
+      if (service) {
+        expect(service.whole, 'a visible service name must not be cut into a fragment').toBe(true);
+        expect(service.left, 'service name must start after the span name').toBeGreaterThanOrEqual(name!.x + name!.width - 1);
+        expect(service.right, 'service name must end before the duration').toBeLessThanOrEqual(duration!.x + 1);
+      }
       expect(name!.x + name!.width, 'span name must end before the duration').toBeLessThanOrEqual(duration!.x + 1);
       expect(name!.width, 'span name must stay readable').toBeGreaterThanOrEqual(60);
 
@@ -212,12 +252,23 @@ test.describe('Tool visualization', () => {
       await page.locator('[data-testid^="trace-item-"]').first().click();
       await expect(page.locator('[data-testid^="span-row-"]')).toHaveCount(22);
 
-      const overlaps = () => page.locator('[data-testid^="span-row-"]').evaluateAll((rows) => rows.flatMap((row) => {
-        const duration = row.children[row.children.length - 2].getBoundingClientRect();
-        return Array.from(row.querySelectorAll('span[title]'))
-          .map((name) => ({ text: name.textContent, right: name.getBoundingClientRect().right, durationLeft: duration.left }))
-          .filter(({ right, durationLeft }) => right > durationLeft + 1);
-      }));
+      const overlaps = async () => {
+        const found: Array<{ text: string | null; right: number; durationLeft: number }> = [];
+        const rows = page.locator('[data-testid^="span-row-"]');
+        for (let i = 0; i < (await rows.count()); i++) {
+          const row = rows.nth(i);
+          const duration = await row.getByTestId('span-duration').boundingBox();
+          const names = row.locator('span[title]');
+          const rects = await visibleRects(names);
+          for (let j = 0; j < rects.length; j++) {
+            const rect = rects[j];
+            if (rect && rect.right > duration!.x + 1) {
+              found.push({ text: await names.nth(j).textContent(), right: rect.right, durationLeft: duration!.x });
+            }
+          }
+        }
+        return found;
+      };
 
       expect(await overlaps(), 'span names must end before the duration').toEqual([]);
       await page.getByRole('button', { name: 'Filter AI spans only' }).click();

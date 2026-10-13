@@ -7,6 +7,8 @@ import {
   isLlmSpan,
   isEmbeddingSpan,
   getSpanKind,
+  getAgentName,
+  getAgentDescription,
   type KeyValuePair,
   type SpanLog,
 } from '../src/utils/llmUtils.ts';
@@ -2232,6 +2234,30 @@ describe('Google ADK - span kind badges', () => {
   assertEquals(getSpanKind([kv('gen_ai.operation.name', 'generate_content')]), 'LLM', 'generate_content maps to LLM');
   assertEquals(getSpanKind([kv('gen_ai.operation.name', 'execute_tool')]), 'TOOL', 'execute_tool maps to TOOL');
   assertEquals(getSpanKind([kv('gen_ai.operation.name', 'invoke_agent')]), 'AGENT', 'invoke_agent maps to AGENT');
+});
+
+describe('getAgentName - attribute and span name conventions', () => {
+  assertEquals(getAgentName([kv('gen_ai.agent.name', 'planner')], 'invoke_agent other'), 'planner', 'gen_ai.agent.name wins over the span name');
+  assertEquals(getAgentName([kv('agent.name', 'planner'), kv('gen_ai.agent.name', 'router')]), 'router', 'gen_ai.agent.name wins over agent.name');
+  assertEquals(getAgentName([kv('agent.name', 'planner')], 'invoke_agent other'), 'planner', 'agent.name wins over the span name');
+  assertEquals(getAgentName([], 'invoke_agent travel_planner'), 'travel_planner', 'invoke_agent <name> span name');
+  assertEquals(getAgentName([], 'create_agent travel_planner'), 'travel_planner', 'create_agent <name> span name');
+  assertEquals(getAgentName([], 'invoke_agent travel planner v2'), 'travel planner v2', 'a name with spaces is kept whole');
+  assertEquals(getAgentName([], 'invoke_agent   padded  '), 'padded', 'surrounding whitespace is trimmed');
+  assertEquals(getAgentName([], 'invoke_agent'), undefined, 'invoke_agent without a name has no agent name');
+  assertEquals(getAgentName([], 'invoke_agent '), undefined, 'invoke_agent followed by blanks has no agent name');
+  assertEquals(getAgentName([], 'invoke_agentx foo'), undefined, 'a longer word is not the invoke_agent prefix');
+  assertEquals(getAgentName([], 'search_flights'), undefined, 'an ordinary span name has no agent name');
+  assertEquals(getAgentName([]), undefined, 'no tags and no span name');
+  assertEquals(getAgentName([kv('gen_ai.agent.name', '')], 'invoke_agent planner'), 'planner', 'an empty attribute falls through to the next source');
+  assertEquals(getAgentName([kv('gen_ai.agent.name', '  ')], 'invoke_agent planner'), 'planner', 'a blank attribute falls through to the next source');
+  assertEquals(getAgentName([kv('gen_ai.agent.name', 'caf\\u00e9')]), 'café', 'unicode escapes in the attribute are decoded');
+});
+
+describe('getAgentDescription', () => {
+  assertEquals(getAgentDescription([kv('gen_ai.agent.description', 'Plans trips')]), 'Plans trips', 'description attribute');
+  assertEquals(getAgentDescription([kv('gen_ai.agent.description', ' ')]), undefined, 'a blank description is none');
+  assertEquals(getAgentDescription([]), undefined, 'no description attribute');
 });
 
 describe('JSON attribute values are parsed from the raw string, not from decoded text', () => {

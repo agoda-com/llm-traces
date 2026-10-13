@@ -6,6 +6,7 @@ import {
   expandOneLevel,
   getAncestorIds,
   getParentSpanIds,
+  getSpanAgents,
   getVisibleSpans,
   indexSpans,
   revealSpan,
@@ -36,17 +37,17 @@ function describe(name: string, fn: () => void): void {
   fn();
 }
 
-function makeSpan(spanId: string, parent: PluginSpan | null): PluginSpan {
+function makeSpan(spanId: string, parent: PluginSpan | null, tags: PluginSpan['tags'] = [], operationName: string = spanId): PluginSpan {
   const span: PluginSpan = {
     traceId: 't',
     spanId,
     parentSpanId: parent ? parent.spanId : null,
-    operationName: spanId,
+    operationName,
     serviceName: 'svc',
     serviceAttributes: [],
     startTimeMs: 0,
     durationMs: 1,
-    tags: [],
+    tags,
     logs: [],
     children: [],
     depth: parent ? parent.depth + 1 : 0,
@@ -145,6 +146,76 @@ describe('5,000-level chain', () => {
   assertEquals(getParentSpanIds(chain).length, depth - 1, 'every span but the last is a parent');
   assertEquals(collapseOneLevel(chain, new Set()).size, 1, 'collapse one level on a chain hides only the deepest parent');
   assertSet(revealSpan(`s${depth - 1}`, byId, new Set(['s5', 's4000'])), [], 'reveal walks the whole chain');
+});
+
+const kind = (value: string) => ({ key: 'openinference.span.kind', value });
+const agentTags = (name: string) => [kind('AGENT'), { key: 'gen_ai.agent.name', value: name }];
+
+describe('agent ownership', () => {
+  // root (no agent)
+  //   early_tool
+  //   coordinator
+  //     llm1
+  //     planner
+  //       llm2
+  //       tool2
+  //     coordinator (same name again)
+  //       llm3
+  //   unowned_tool
+  const root = makeSpan('root', null, [kind('CHAIN')]);
+  const early = makeSpan('early', root, [kind('TOOL')]);
+  const coord = makeSpan('coord', root, agentTags('coordinator'));
+  makeSpan('llm1', coord, [kind('LLM')]);
+  const planner = makeSpan('planner', coord, [kind('AGENT')], 'invoke_agent planner');
+  makeSpan('llm2', planner, [kind('LLM')]);
+  makeSpan('tool2', planner, [kind('TOOL')]);
+  const again = makeSpan('again', coord, agentTags('coordinator'));
+  makeSpan('llm3', again, [kind('LLM')]);
+  const late = makeSpan('late', root, [kind('TOOL'), { key: 'gen_ai.agent.name', value: 'ignored' }]);
+  const agents = getSpanAgents([root]);
+
+  assertEquals(agents.has('root'), false, 'a span above every agent has no owner');
+  assertEquals(agents.has(early.spanId), false, 'a sibling before the first agent has no owner');
+  assertEquals(agents.has(late.spanId), false, 'a non-agent span is not an agent even with an agent name attribute');
+  assertEquals(agents.get('coord')?.name, 'coordinator', 'an agent span owns itself');
+  assertEquals(agents.get('coord')?.handoffFrom, undefined, 'a top-level agent was not handed off from anyone');
+  assertEquals(agents.get('llm1')?.name, 'coordinator', 'a child of an agent is owned by it');
+  assertEquals(agents.get('planner')?.name, 'planner', 'the agent name comes from the span name when there is no attribute');
+  assertEquals(agents.get('planner')?.handoffFrom, 'coordinator', 'a nested agent is handed off from its parent agent');
+  assertEquals(agents.get('llm2')?.name, 'planner', 'the nearest agent owns the span');
+  assertEquals(agents.get('tool2')?.name, 'planner', 'a tool span is owned by the nearest agent');
+  assertEquals(agents.get('llm2')?.handoffFrom, 'coordinator', 'owned spans share their agent record');
+  assertEquals(agents.get('again')?.name, 'coordinator', 'the same agent name nests');
+  assertEquals(agents.get('again')?.handoffFrom, undefined, 'an agent under an agent of the same name is not a handoff');
+  assertEquals(agents.get('llm3')?.name, 'coordinator', 'span under the nested same-name agent');
+  assertEquals(agents.get('coord')?.colorIndex, agents.get('llm3')?.colorIndex, 'one name has one color index');
+  assertEquals(agents.get('coord')?.colorIndex === agents.get('planner')?.colorIndex, false, 'different agents get different color indexes');
+  assertEquals(agents.get('coord')?.colorIndex, 0, 'color indexes follow first appearance, starting at 0');
+  assertEquals(agents.get('planner')?.colorIndex, 1, 'second agent gets index 1');
+
+  const second = getSpanAgents([root]);
+  assertEquals(second.get('planner')?.colorIndex, agents.get('planner')?.colorIndex, 'the same trace gives the same color indexes every time');
+});
+
+describe('agent ownership - unnamed agent spans and several roots', () => {
+  const a = makeSpan('a', null, [kind('AGENT')], 'research loop');
+  makeSpan('b', a, [kind('LLM')]);
+  const other = makeSpan('other', null, agentTags('writer'));
+  const agents = getSpanAgents([a, other]);
+  assertEquals(agents.get('a')?.name, 'research loop', 'an agent span without a name attribute is named after its span');
+  assertEquals(agents.get('b')?.name, 'research loop', 'its children belong to it');
+  assertEquals(agents.get('other')?.handoffFrom, undefined, 'a second root agent is not handed off from the first');
+  assertEquals(getSpanAgents([]).size, 0, 'an empty trace has no agents');
+});
+
+describe('agent ownership - 5,000-level chain of agents', () => {
+  const chain: PluginSpan[] = [];
+  for (let i = 0; i < 5000; i++) {
+    chain.push(makeSpan(`c${i}`, i === 0 ? null : chain[i - 1], agentTags(`agent ${i % 3}`)));
+  }
+  const agents = getSpanAgents([chain[0]]);
+  assertEquals(agents.size, 5000, 'every span of a deep chain is visited');
+  assertEquals(agents.get('c4999')?.handoffFrom, 'agent 0', 'the deepest agent knows its parent agent');
 });
 
 console.log(`\nResults: ${passed} passed, ${failed} failed`);

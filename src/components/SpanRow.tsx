@@ -1,4 +1,4 @@
-import React, { memo } from 'react';
+import React, { memo, ReactNode } from 'react';
 
 import { css, cx } from '@emotion/css';
 import { GrafanaTheme2 } from '@grafana/data';
@@ -7,12 +7,18 @@ import { useStyles2, Icon } from '@grafana/ui';
 import { PluginSpan } from '../utils/tempoClient';
 import { getAncestorIds } from '../utils/traceTree';
 import { hiddenLevelsWidth, layoutGuides } from '../utils/guideLayout';
-import { getSpanKindColor, getSpanKind, getAgentName } from '../utils/llmUtils';
+import { SpanAgent } from '../utils/traceTree';
+import { AgentColor, pickAgentColor } from '../utils/agentColors';
+import { getSpanKindColor, getSpanKind } from '../utils/llmUtils';
 import { formatDuration } from '../utils/formatUtils';
+import { KindIcon } from './KindIcon';
 
 export const SPAN_ROW_HEIGHT = 36;
 // Space the name keeps when the indent is wider than the name column.
 export const NAME_MIN_WIDTH = 72;
+// Height of the one-line groups that hold the service name and the agent items.
+const ITEM_LINE_HEIGHT = 20;
+const ITEM_NAME_MAX_WIDTH = '16ch';
 
 const getStyles = (theme: GrafanaTheme2) => ({
   row: css({
@@ -52,6 +58,19 @@ const getStyles = (theme: GrafanaTheme2) => ({
       width: '3px',
       background: theme.colors.error.border,
     },
+  }),
+  // The agent rail takes the left edge, so the selection and error bars sit next to it.
+  rowWithRail: css({
+    '&::before': {
+      left: '3px',
+    },
+  }),
+  agentRail: css({
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: '3px',
   }),
   // Same width as the name column in the header, so the columns line up.
   nameCell: css({
@@ -134,28 +153,64 @@ const getStyles = (theme: GrafanaTheme2) => ({
     whiteSpace: 'nowrap',
     color: theme.colors.text.primary,
   }),
+  agentLabel: css({
+    fontWeight: 600,
+  }),
+  // The agent item and the service name sit after the span name in one group that is one line tall and clips its
+  // overflow. An item that does not fit wraps to the second line and disappears whole; the empty ::before on the
+  // first line makes even a lone item wrap instead of being cut off. Items wrap from the end, so the service name
+  // goes first, then the agent item. The group shrinks before the span name does, so the span name is cut only when
+  // it does not fit alone, and any blank space the group leaves falls after the name, at the end of the row.
+  trailingGroup: css({
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignContent: 'flex-start',
+    alignItems: 'center',
+    flex: '0 1 auto',
+    flexShrink: 1e6,
+    height: `${ITEM_LINE_HEIGHT}px`,
+    minWidth: 0,
+    overflow: 'hidden',
+    '&::before': {
+      content: '""',
+      flex: 'none',
+      width: 0,
+      height: `${ITEM_LINE_HEIGHT}px`,
+    },
+    '& > *': {
+      flexShrink: 0,
+    },
+    '& > * + *': {
+      marginLeft: theme.spacing(0.75),
+    },
+  }),
   serviceName: css({
     fontSize: '11px',
     color: theme.colors.text.secondary,
-    // Gives up its space long before the span name does.
-    flexShrink: 1000,
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
   }),
-  kindBadge: css({
-    fontSize: '10px',
-    padding: `1px 5px`,
-    borderRadius: '3px',
-    fontWeight: theme.typography.fontWeightMedium,
-    color: '#fff',
-    flexShrink: 0,
-    letterSpacing: '0.03em',
-  }),
-  agentName: css({
+  handoff: css({
     fontSize: '11px',
     color: theme.colors.text.secondary,
-    flexShrink: 0,
+    whiteSpace: 'nowrap',
+  }),
+  // Long agent names are cut inside the item, which stays one unit that fits whole or is hidden.
+  cappedName: css({
+    display: 'inline-block',
+    maxWidth: ITEM_NAME_MAX_WIDTH,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    verticalAlign: 'bottom',
+    whiteSpace: 'nowrap',
+  }),
+  ownerChip: css({
+    padding: '0 6px',
+    borderRadius: theme.shape.radius.pill,
+    border: '1px solid',
+    fontSize: '10px',
+    lineHeight: '14px',
+    whiteSpace: 'nowrap',
+    color: theme.colors.text.primary,
   }),
   durationCol: css({
     fontSize: theme.typography.bodySmall.fontSize,
@@ -224,6 +279,12 @@ export interface GuideContext {
   onHoverEnd: (ancestorId: string) => void;
 }
 
+/** Who owns each span, and the colours of the owners. */
+export interface AgentLayer {
+  byId: Map<string, SpanAgent>;
+  colors: AgentColor[];
+}
+
 const ROOT_GUIDE_ID = 'root';
 
 // Moving between two guides of the same ancestor (e.g. in the next row) keeps the highlight.
@@ -242,13 +303,16 @@ interface SpanRowProps {
   traceDurationMs: number;
   displayDepth?: number;
   guideContext: GuideContext;
+  agentLayer: AgentLayer;
 }
 
-export const SpanRow = memo(function SpanRow({ span, top, isSelected, isExpanded, onToggleExpand, onClick, traceStartMs, traceDurationMs, displayDepth, guideContext }: SpanRowProps) {
+export const SpanRow = memo(function SpanRow({ span, top, isSelected, isExpanded, onToggleExpand, onClick, traceStartMs, traceDurationMs, displayDepth, guideContext, agentLayer }: SpanRowProps) {
   const styles = useStyles2(getStyles);
-  const agentName = getAgentName(span.tags);
+  const agent = agentLayer.byId.get(span.spanId);
+  const agentColor = agent && pickAgentColor(agentLayer.colors, agent.colorIndex);
   const kindValue = getSpanKind(span.tags);
   const kindColor = getSpanKindColor(kindValue);
+  const isAgentSpan = agent !== undefined && kindValue === 'AGENT';
   const hasChildren = span.children.length > 0;
   const hasError = isErrorSpan(span);
   const isOrphaned = span.tags.some((t) => t.key === '_orphaned' && t.value === true);
@@ -278,9 +342,27 @@ export const SpanRow = memo(function SpanRow({ span, top, isSelected, isExpanded
     markerWidth + remPx
   );
 
+  // "from X" on an agent span that was handed the work, the owner chip on any other span of an agent.
+  let agentItem: ReactNode = null;
+  if (agent && agentColor) {
+    if (!isAgentSpan) {
+      agentItem = (
+        <span className={styles.ownerChip} style={{ background: agentColor.tint, borderColor: agentColor.solid }} title={`Agent: ${agent.name}`} data-testid="span-owner-chip">
+          <span className={styles.cappedName}>{agent.name}</span>
+        </span>
+      );
+    } else if (agent.handoffFrom) {
+      agentItem = (
+        <span className={styles.handoff} title={`Handed off from ${agent.handoffFrom}`} data-testid="span-handoff-from">
+          from <span className={styles.cappedName}>{agent.handoffFrom}</span>
+        </span>
+      );
+    }
+  }
+
   return (
     <div
-      className={cx(styles.row, !isSelected && hasError && styles.rowError, isSelected && styles.rowSelected)}
+      className={cx(styles.row, !isSelected && hasError && styles.rowError, isSelected && styles.rowSelected, agent && styles.rowWithRail)}
       style={{ top }}
       onClick={() => onClick(span)}
       data-testid={`span-row-${span.spanId}`}
@@ -288,7 +370,10 @@ export const SpanRow = memo(function SpanRow({ span, top, isSelected, isExpanded
       tabIndex={0}
       onKeyDown={(e) => e.key === 'Enter' && onClick(span)}
     >
-      <div className={styles.nameCell}>
+      {agent && agentColor && (
+        <span className={styles.agentRail} style={{ background: agentColor.solid }} data-testid="span-agent-rail" data-agent={agent.name} />
+      )}
+      <div className={styles.nameCell} data-testid="span-name-cell">
         <div className={styles.guides} style={{ width: layout.areaWidth }}>
           <div className={styles.guidesClip} style={{ width: layout.clipWidth }}>
             {guideIds.slice(0, layout.visible).map((ancestorId, i) => (
@@ -327,20 +412,18 @@ export const SpanRow = memo(function SpanRow({ span, top, isSelected, isExpanded
           )}
         </div>
 
-        {/* name + service + kind badge */}
-        <div className={styles.nameCol}>
+        {/* kind icon, name, then the handoff or owner chip and the service name */}
+        <div className={styles.nameCol} data-testid="span-name-content">
           {hasError && (
             <div className={styles.errorDot} title="Error span">
               <Icon name="exclamation" size="xs" />
             </div>
           )}
-          <span className={styles.serviceName}>{span.serviceName}</span>
-          <span className={styles.spanName} title={span.operationName}>{span.operationName}</span>
-          {kindValue && (
-            <span className={styles.kindBadge} style={{ background: kindColor }}>{kindValue.toUpperCase()}</span>
-          )}
-          {agentName && (
-            <span className={styles.agentName}>{agentName}</span>
+          {kindValue && <KindIcon kind={kindValue} />}
+          {isAgentSpan ? (
+            <span className={cx(styles.spanName, styles.agentLabel)} title={span.operationName} data-testid="span-agent-label">{agent.name}</span>
+          ) : (
+            <span className={styles.spanName} title={span.operationName} data-testid="span-operation-name">{span.operationName}</span>
           )}
           {isOrphaned && (
             <span
@@ -350,11 +433,19 @@ export const SpanRow = memo(function SpanRow({ span, top, isSelected, isExpanded
               orphaned
             </span>
           )}
+          {(agentItem || span.serviceName) && (
+            <div className={styles.trailingGroup} data-testid="span-trailing-items">
+              {agentItem}
+              {span.serviceName && (
+                <span className={cx(styles.serviceName, styles.cappedName)} title={span.serviceName} data-testid="span-service-name">{span.serviceName}</span>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
       {/* duration */}
-      <div className={styles.durationCol}>{formatDuration(span.durationMs)}</div>
+      <div className={styles.durationCol} data-testid="span-duration">{formatDuration(span.durationMs)}</div>
 
       {/* timeline bar */}
       <div className={styles.barCol}>

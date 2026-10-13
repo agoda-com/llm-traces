@@ -1,3 +1,4 @@
+import { getAgentName, getSpanKind } from './llmUtils.ts';
 import type { PluginSpan } from './tempoClient.ts';
 
 /** Spans by id. When ids repeat, the last span wins, like the parent lookup in tempoClient's buildTree. */
@@ -119,4 +120,50 @@ export function revealSpan(spanId: string, byId: Map<string, PluginSpan>, collap
   const next = new Set(collapsed);
   hidden.forEach((id) => next.delete(id));
   return next;
+}
+
+/** The agent that owns a span. */
+export interface SpanAgent {
+  name: string;
+  /** Name of the nearest ancestor agent when it differs from `name`: the agent this one was handed work by. */
+  handoffFrom?: string;
+  /** Position of `name` among the trace's agent names in order of first appearance, for picking a colour. */
+  colorIndex: number;
+}
+
+/**
+ * The owner of every span that has one: the span itself when it is an agent span, otherwise its nearest ancestor
+ * agent span. Spans outside every agent are not in the map. Spans owned by the same agent span share one record.
+ * An agent span without an agent name is named after its span.
+ */
+export function getSpanAgents(roots: PluginSpan[]): Map<string, SpanAgent> {
+  const agents = new Map<string, SpanAgent>();
+  const colorIndexes = new Map<string, number>();
+  const pending: PluginSpan[] = [];
+  const pendingOwners: Array<SpanAgent | undefined> = [];
+  for (let i = roots.length - 1; i >= 0; i--) {
+    pending.push(roots[i]);
+    pendingOwners.push(undefined);
+  }
+  while (pending.length > 0) {
+    const span = pending.pop()!;
+    let owner = pendingOwners.pop();
+    if (getSpanKind(span.tags) === 'AGENT') {
+      const name = getAgentName(span.tags, span.operationName) ?? span.operationName;
+      let colorIndex = colorIndexes.get(name);
+      if (colorIndex === undefined) {
+        colorIndex = colorIndexes.size;
+        colorIndexes.set(name, colorIndex);
+      }
+      owner = { name, handoffFrom: owner && owner.name !== name ? owner.name : undefined, colorIndex };
+    }
+    if (owner) {
+      agents.set(span.spanId, owner);
+    }
+    for (let i = span.children.length - 1; i >= 0; i--) {
+      pending.push(span.children[i]);
+      pendingOwners.push(owner);
+    }
+  }
+  return agents;
 }

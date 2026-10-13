@@ -10,9 +10,10 @@ import { isLlmSpan, isGuardrailSpan, isAiSpan, extractLlmSpanData } from '../uti
 import { estimateCost, formatCost } from '../utils/costUtils';
 import { formatDuration } from '../utils/formatUtils';
 import { clampNameColumnFraction, loadNameColumnFraction, saveNameColumnFraction } from '../utils/nameColumn';
-import { collapseOneLevel, expandOneLevel, getParentSpanIds, getVisibleSpans, indexSpans, revealSpan } from '../utils/traceTree';
+import { collapseOneLevel, expandOneLevel, getParentSpanIds, getSpanAgents, getVisibleSpans, indexSpans, revealSpan } from '../utils/traceTree';
+import { getAgentColors } from '../utils/agentColors';
 import { useVirtualList } from '../utils/useVirtualList';
-import { GuideContext, NAME_MIN_WIDTH, SPAN_ROW_HEIGHT, SpanRow } from './SpanRow';
+import { AgentLayer, GuideContext, NAME_MIN_WIDTH, SPAN_ROW_HEIGHT, SpanRow } from './SpanRow';
 import { SpanDetailPanel } from './SpanDetailPanel';
 import { NameColumnResizer } from './NameColumnResizer';
 
@@ -66,6 +67,9 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
   const flatSpans = useMemo(() => spans ? flattenTree(spans) : [], [spans]);
   const spanById = useMemo(() => indexSpans(flatSpans), [flatSpans]);
   spanByIdRef.current = spanById;
+  const spanAgents = useMemo(() => spans ? getSpanAgents(spans) : new Map(), [spans]);
+  const agentColors = useMemo(() => getAgentColors(theme), [theme]);
+  const agentLayer = useMemo<AgentLayer>(() => ({ byId: spanAgents, colors: agentColors }), [spanAgents, agentColors]);
 
   const handleToggleExpand = useCallback((spanId: string) => {
     setCollapsed((prev) => {
@@ -725,6 +729,7 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
                       traceDurationMs={traceDurationMs}
                       displayDepth={aiOnly ? (span.depth ?? 0) - minAiDepth : undefined}
                       guideContext={guideContext}
+                      agentLayer={agentLayer}
                     />
                   );
                 })}
@@ -767,9 +772,9 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
                 </div>
               ) : selectedSpan ? (
                 /* BUG-025: key prop forces React to remount on span change, preventing leaked UI state */
-                <SpanDetailPanel key={selectedSpan.spanId} span={selectedSpan} />
+                <SpanDetailPanel key={selectedSpan.spanId} span={selectedSpan} agentLayer={agentLayer} />
               ) : firstLlmSpan && !userDismissedDetail ? (
-                <SpanDetailPanel key={firstLlmSpan.spanId} span={firstLlmSpan} />
+                <SpanDetailPanel key={firstLlmSpan.spanId} span={firstLlmSpan} agentLayer={agentLayer} />
               ) : (
                 <div className={styles.detailPlaceholder}>
                   <Icon name="arrow-right" size="xl" />

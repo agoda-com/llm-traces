@@ -194,6 +194,36 @@ export const getStyles = (theme: GrafanaTheme2) => ({
     color: theme.colors.text.primary,
     marginBottom: theme.spacing(0.25),
   }),
+  // A whole number of pixels tall, so the content below the header keeps its sub-pixel position.
+  spanDetailAgentRow: css({
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: `${theme.spacing(0.25)} ${theme.spacing(1.5)}`,
+    minHeight: '24px',
+    fontSize: theme.typography.bodySmall.fontSize,
+    color: theme.colors.text.secondary,
+  }),
+  spanDetailAgentItem: css({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: theme.spacing(0.5),
+  }),
+  spanDetailAgentDot: css({
+    width: '8px',
+    height: '8px',
+    borderRadius: '50%',
+    flexShrink: 0,
+  }),
+  spanDetailAgentName: css({
+    fontWeight: theme.typography.fontWeightBold,
+    color: theme.colors.text.primary,
+  }),
+  spanDetailAgentDescription: css({
+    fontSize: theme.typography.bodySmall.fontSize,
+    color: theme.colors.text.secondary,
+    marginBottom: theme.spacing(0.5),
+  }),
   spanDetailMeta: css({
     fontSize: '11px',
     color: theme.colors.text.secondary,
