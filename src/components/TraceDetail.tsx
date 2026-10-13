@@ -2,7 +2,7 @@ import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useR
 
 import { useResize } from '../utils/useResize';
 
-import { useStyles2, useTheme2, Alert, Icon } from '@grafana/ui';
+import { useStyles2, useTheme2, Alert, Button, Icon } from '@grafana/ui';
 import { getStyles, SPAN_DETAIL_RESERVED_WIDTH, SPAN_LIST_MIN_WIDTH } from './TraceDetail.styles';
 
 import { PluginSpan, flattenTree, getTraceDurationMs, getTraceStartMs } from '../utils/tempoClient';
@@ -563,6 +563,21 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
             >
               <div className={styles.listHeader} ref={listHeaderRef}>
                 <div className={styles.toolbar}>
+                  <div className={styles.toolbarToggles}>
+                    {/* The icon is in Grafana's icon index from 11.3 on, like those of KindIcon. */}
+                    <Button
+                      size="sm"
+                      icon="ai"
+                      variant={aiOnly ? 'primary' : 'secondary'}
+                      fill={aiOnly ? 'solid' : 'outline'}
+                      aria-pressed={aiOnly}
+                      title="Show only AI spans"
+                      data-testid="ai-only-toggle"
+                      onClick={() => setAiOnly((v) => !v)}
+                    >
+                      AI only
+                    </Button>
+                  </div>
                   <button
                     onClick={handleExpandOne}
                     title="Expand +1"
@@ -594,28 +609,6 @@ export function TraceDetailView({ traceId, rootName, spans, loading, error, onBa
                     style={iconButtonStyle}
                   >
                     <Icon name="angle-double-up" size="xs" />
-                  </button>
-                  <button
-                    onClick={() => setAiOnly((v) => !v)}
-                    title="Show only AI spans"
-                    aria-label="Filter AI spans only"
-                    aria-pressed={aiOnly}
-                    style={{
-                      marginLeft: theme.spacing(1),
-                      padding: `${theme.spacing(0.25)} ${theme.spacing(0.75)}`,
-                      borderRadius: '10px',
-                      border: aiOnly ? 'none' : `1px solid ${theme.colors.border.medium}`,
-                      background: aiOnly ? theme.colors.primary.main : 'none',
-                      color: aiOnly ? '#fff' : theme.colors.text.secondary,
-                      fontSize: '10px',
-                      fontWeight: theme.typography.fontWeightMedium,
-                      cursor: 'pointer',
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.05em',
-                      lineHeight: 1.4,
-                    }}
-                  >
-                    AI only
                   </button>
                   <div style={{ marginLeft: 'auto', display: 'flex', gap: theme.spacing(0.5) }}>
                     <button

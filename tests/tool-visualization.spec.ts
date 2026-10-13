@@ -271,7 +271,7 @@ test.describe('Tool visualization', () => {
       };
 
       expect(await overlaps(), 'span names must end before the duration').toEqual([]);
-      await page.getByRole('button', { name: 'Filter AI spans only' }).click();
+      await page.getByRole('button', { name: 'AI only', exact: true }).click();
       expect(await overlaps(), 'span names must end before the duration with AI only').toEqual([]);
     });
   }

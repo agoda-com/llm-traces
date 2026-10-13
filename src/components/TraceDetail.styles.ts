@@ -110,6 +110,11 @@ export const getStyles = (theme: GrafanaTheme2) => ({
     padding: `${theme.spacing(0.5)} ${theme.spacing(1)}`,
     borderBottom: `1px solid ${theme.colors.border.weak}`,
   }),
+  toolbarToggles: css({
+    display: 'flex',
+    gap: theme.spacing(0.5),
+    marginRight: theme.spacing(1),
+  }),
   columnHeader: css({
     display: 'flex',
     padding: `${theme.spacing(0.75)} ${theme.spacing(1)}`,

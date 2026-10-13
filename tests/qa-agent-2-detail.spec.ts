@@ -119,7 +119,7 @@ test.describe('QA-2: Trace detail view, span list, span detail panel', () => {
     const spanRows = page.locator('[data-testid^="span-row-"]');
     const countBefore = await spanRows.count();
 
-    const aiOnlyBtn = page.locator('button[aria-label="Filter AI spans only"]');
+    const aiOnlyBtn = page.getByRole('button', { name: 'AI only', exact: true });
     await expect(aiOnlyBtn).toBeVisible();
     await aiOnlyBtn.click();
     await page.waitForTimeout(300);
