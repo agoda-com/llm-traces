@@ -43,3 +43,21 @@ export function formatCompactArray(value: unknown): string | undefined {
   const compact = `[${value.map((item) => JSON.stringify(item)).join(', ')}]`;
   return compact.length <= MAX_COMPACT_ARRAY_LENGTH ? compact : undefined;
 }
+
+/**
+ * Format a span attribute value as display text. Arrays are comma separated and key-value lists are
+ * `key=value` pairs, the text the attribute table showed before such values were kept structured.
+ * Objects inside arrays and arrays inside arrays have no earlier text and are shown as JSON.
+ */
+export function formatAttributeValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => (typeof item === 'object' && item !== null ? JSON.stringify(item) : formatAttributeValue(item))).join(', ');
+  }
+  if (typeof value === 'object') {
+    return Object.entries(value).map(([key, entry]) => `${key}=${formatAttributeValue(entry)}`).join(', ');
+  }
+  return String(value);
+}

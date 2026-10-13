@@ -4,7 +4,7 @@ import { getStyles } from './TraceDetail.styles';
 import { PluginSpan } from '../utils/tempoClient';
 import { decodeUnicodeEscapes, extractLlmSpanData, getAgentDescription, getLlmDisplayAttributeKeys, getSpanKind } from '../utils/llmUtils';
 import { pickAgentColor } from '../utils/agentColors';
-import { formatDuration } from '../utils/formatUtils';
+import { formatAttributeValue, formatDuration } from '../utils/formatUtils';
 import { KindIcon, getKindLabel } from './KindIcon';
 import { AgentLayer } from './SpanRow';
 import { LlmSpanDetail } from './LlmSpanDetail';
@@ -59,8 +59,8 @@ export function SpanDetailPanel({ span, agentLayer }: SpanDetailPanelProps) {
   const isAgentSpan = agent !== undefined && kind === 'AGENT';
   const agentDescription = isAgentSpan ? getAgentDescription(span.tags) : undefined;
   const llmData = useMemo(
-    () => extractLlmSpanData(span.tags, span.logs, span.operationName),
-    [span.tags, span.logs, span.operationName]
+    () => extractLlmSpanData(span.tags, span.logs, span.operationName, { name: span.scopeName, version: span.scopeVersion }),
+    [span.tags, span.logs, span.operationName, span.scopeName, span.scopeVersion]
   );
   const llmAttributeKeys = useMemo(
     () => getLlmDisplayAttributeKeys(span.tags, llmData),
@@ -72,7 +72,7 @@ export function SpanDetailPanel({ span, agentLayer }: SpanDetailPanelProps) {
   const llmAttributesExpanded = expandedLlmAttributesForSpan === span.spanId;
 
   const renderValue = (value: unknown) => {
-    const raw = decodeUnicodeEscapes(String(value));
+    const raw = decodeUnicodeEscapes(formatAttributeValue(value));
     const expanded = expandStrings ? tryExpandString(raw) : raw;
     return expanded !== raw
       ? <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'inherit' }}>{expanded}</pre>

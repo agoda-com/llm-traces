@@ -1,6 +1,8 @@
 // Ported from public/app/features/explore/TraceView/components/TraceTimelineViewer/SpanDetail/llmUtils.ts
 // Extracts LLM span data from OpenInference / OTel GenAI / Vertex AI / generic conventions.
 
+import { formatAttributeValue } from './formatUtils.ts';
+
 export interface KeyValuePair {
   key: string;
   value: unknown;
@@ -61,6 +63,29 @@ export interface LlmInvocationParams {
 
 export type LlmConvention = 'openinference' | 'otel-genai' | 'vertex' | 'generic' | 'unknown';
 
+// Frameworks with their own attribute conventions on top of, or instead of, OTel GenAI.
+export type LlmFramework = 'vercel-ai' | 'pydantic-ai' | 'langfuse';
+
+// The instrumentation scope that produced the span (OTLP scopeSpans[].scope).
+export interface SpanScope {
+  name?: string;
+  version?: string;
+}
+
+const FRAMEWORK_BY_SCOPE_NAME: Record<string, LlmFramework> = {
+  ai: 'vercel-ai',
+  'pydantic-ai': 'pydantic-ai',
+  'langfuse-sdk': 'langfuse',
+};
+
+/**
+ * Identifies the framework that emitted a span from its instrumentation scope name.
+ * Trace totals are computed without a scope, so detection rules must not depend on it alone.
+ */
+export function detectFramework(_tags: KeyValuePair[], scope?: SpanScope): LlmFramework | undefined {
+  return scope?.name ? FRAMEWORK_BY_SCOPE_NAME[scope.name] : undefined;
+}
+
 export interface LlmSpanData {
   isLlm: boolean;
   convention: LlmConvention;
@@ -76,6 +101,7 @@ export interface LlmSpanData {
   precomputedCostUsd?: number;
   // Explains why a span has no messages even though it is an LLM or tool span (content capture off).
   contentNotices?: string[];
+  framework?: LlmFramework;
 }
 
 /**
@@ -96,7 +122,7 @@ export function decodeUnicodeEscapes(s: string): string {
 function getAttr(tags: KeyValuePair[], key: string): string | undefined {
   const value = getRawAttr(tags, key);
   if (value === null || value === undefined) return undefined;
-  return decodeUnicodeEscapes(String(value));
+  return decodeUnicodeEscapes(formatAttributeValue(value));
 }
 
 function getRawAttr(tags: KeyValuePair[], key: string): unknown {
@@ -107,7 +133,10 @@ function getRawAttr(tags: KeyValuePair[], key: string): unknown {
 // escape sequences such as an escaped backslash followed by "u0041" into invalid JSON.
 function getRawStringAttr(tags: KeyValuePair[], key: string): string | undefined {
   const value = getRawAttr(tags, key);
-  return value === null || value === undefined ? undefined : String(value);
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  return typeof value === 'object' ? JSON.stringify(value) : String(value);
 }
 
 function getNumAttr(tags: KeyValuePair[], key: string): number | undefined {
@@ -1161,7 +1190,7 @@ function extractGeneric(tags: KeyValuePair[], logs: SpanLog[], operationName?: s
   };
 }
 
-export function extractLlmSpanData(tags: KeyValuePair[], logs: SpanLog[], operationName?: string): LlmSpanData {
+export function extractLlmSpanData(tags: KeyValuePair[], logs: SpanLog[], operationName?: string, scope?: SpanScope): LlmSpanData {
   const convention = detectConvention(tags);
   if (!convention) {
     return { isLlm: false, convention: 'unknown', model: '', inputMessages: [], outputMessages: [], tools: [], tokenUsage: {}, invocationParams: {}, finishReason: undefined };
@@ -1199,7 +1228,8 @@ export function extractLlmSpanData(tags: KeyValuePair[], logs: SpanLog[], operat
   const isLlm = convention === 'openinference'
     ? data.spanKind?.toUpperCase() === 'LLM' || data.spanKind?.toUpperCase() === 'GUARDRAIL'
     : getSpanKind(tags) !== 'TOOL';
-  return { isLlm, ...data };
+  const framework = detectFramework(tags, scope);
+  return { isLlm, ...data, ...(framework ? { framework } : {}) };
 }
 
 export function getLlmDisplayAttributeKeys(

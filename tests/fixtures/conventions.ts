@@ -200,3 +200,29 @@ export const GENAI_TOOL_TRACE = buildTrace(CONVENTION_TRACE_ID, { name: 'example
     },
   },
 ]);
+
+// ---------------------------------------------------------------------------
+// Area 3: structured attribute values and instrumentation scope
+// ---------------------------------------------------------------------------
+
+export const STRUCTURED_ATTRIBUTES_TRACE = buildTrace(CONVENTION_TRACE_ID, { name: 'example.genai', version: '2.3.4' }, [
+  {
+    spanId: 'structspan000001',
+    name: 'chat model-a',
+    startMs: 0,
+    endMs: 800,
+    attributes: {
+      'gen_ai.operation.name': 'chat',
+      'gen_ai.request.model': 'model-a',
+      'gen_ai.system_instructions': [{ type: 'text', content: 'Answer in French.' }],
+      'gen_ai.input.messages': [{ role: 'user', parts: [{ type: 'text', content: 'Say hello.' }] }],
+      'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'Bonjour.' }], finish_reason: 'stop' }],
+      'gen_ai.response.finish_reasons': ['stop'],
+      'gen_ai.tool.definitions': [
+        { type: 'function', name: 'translate', description: 'Translate text', parameters: { type: 'object', properties: { text: { type: 'string' } } } },
+      ],
+      'custom.labels': ['alpha', 'beta'],
+      'custom.settings': { region: 'eu', retries: 2 },
+    },
+  },
+]);

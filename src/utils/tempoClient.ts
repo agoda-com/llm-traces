@@ -36,9 +36,26 @@ export interface PluginSpan {
   // Populated from the OTLP status object OR from otel.status_code/otel.status_description attributes.
   statusCode?: 'OK' | 'ERROR' | 'UNSET';
   statusMessage?: string;
+  // Instrumentation scope that produced the span (OTLP scopeSpans[].scope). Frameworks identify
+  // themselves this way, e.g. the Vercel AI SDK uses the scope name "ai".
+  scopeName?: string;
+  scopeVersion?: string;
 }
 
-function parseOtlpValue(val: { stringValue?: string; intValue?: string; doubleValue?: number; boolValue?: boolean; arrayValue?: { values?: Array<{ stringValue?: string; intValue?: string; doubleValue?: number; boolValue?: boolean }> }; kvlistValue?: unknown }): unknown {
+interface OtlpValue {
+  stringValue?: string;
+  intValue?: string;
+  doubleValue?: number;
+  boolValue?: boolean;
+  arrayValue?: { values?: OtlpValue[] };
+  kvlistValue?: { values?: Array<{ key: string; value: OtlpValue }> };
+  bytesValue?: unknown;
+}
+
+// Arrays stay arrays and key-value lists become objects, so structured GenAI attributes such as
+// gen_ai.input.messages sent as native OTLP values can be read as data. Display code turns them
+// into text with formatAttributeValue.
+function parseOtlpValue(val: OtlpValue): unknown {
   if (val.stringValue !== undefined) {
     return val.stringValue;
   }
@@ -51,39 +68,22 @@ function parseOtlpValue(val: { stringValue?: string; intValue?: string; doubleVa
   if (val.boolValue !== undefined) {
     return val.boolValue;
   }
-  // BUG-036 fix: arrayValue returns ALL elements joined, not just the first.
-  if (val.arrayValue?.values && val.arrayValue.values.length > 0) {
-    const parts = val.arrayValue.values.map((item) => {
-      if (item.stringValue !== undefined) { return String(item.stringValue); }
-      if (item.intValue !== undefined) { return String(Number(item.intValue)); }
-      if (item.doubleValue !== undefined) { return String(item.doubleValue); }
-      if (item.boolValue !== undefined) { return String(item.boolValue); }
-      return '';
-    });
-    return parts.join(', ');
+  if (val.arrayValue !== undefined) {
+    return (val.arrayValue?.values ?? []).map(parseOtlpValue);
   }
-  // BUG-037 fix: handle kvlistValue — serialize as key=value pairs.
-  if ((val as any).kvlistValue !== undefined) {
-    const kv = (val as any).kvlistValue as { values?: Array<{ key: string; value: { stringValue?: string; intValue?: string; doubleValue?: number; boolValue?: boolean } }> };
-    if (kv?.values && kv.values.length > 0) {
-      return kv.values.map((entry) => {
-        const v = parseOtlpValue(entry.value as Parameters<typeof parseOtlpValue>[0]);
-        return `${entry.key}=${v}`;
-      }).join(', ');
-    }
-    return '';
+  if (val.kvlistValue !== undefined) {
+    return Object.fromEntries((val.kvlistValue?.values ?? []).map((entry) => [entry.key, parseOtlpValue(entry.value)]));
   }
   // BUG-049 fix: handle bytesValue — return base64 string or '(binary)'.
-  if ((val as any).bytesValue !== undefined) {
-    const bv = (val as any).bytesValue;
-    return typeof bv === 'string' ? bv : '(binary)';
+  if (val.bytesValue !== undefined) {
+    return typeof val.bytesValue === 'string' ? val.bytesValue : '(binary)';
   }
   return '';
 }
 
 interface OtlpAttribute {
   key: string;
-  value: { stringValue?: string; intValue?: string; doubleValue?: number; boolValue?: boolean; arrayValue?: { values?: Array<{ stringValue?: string; intValue?: string; doubleValue?: number; boolValue?: boolean }> }; kvlistValue?: unknown };
+  value: OtlpValue;
 }
 
 interface OtlpSpan {
@@ -104,7 +104,16 @@ interface OtlpSpan {
   status?: { code?: string | number; message?: string };
 }
 
+interface OtlpScope {
+  name?: string;
+  version?: string;
+}
+
 interface OtlpScopeSpan {
+  // new OTLP field name
+  scope?: OtlpScope;
+  // old OTLP field name (pre-stable)
+  instrumentationLibrary?: OtlpScope;
   spans: OtlpSpan[];
 }
 
@@ -161,6 +170,7 @@ export function parseOtlpTrace(data: unknown): PluginSpan[] {
     const scopeSpans: OtlpScopeSpan[] = rs.scopeSpans ?? rs.instrumentationLibrarySpans ?? [];
 
     for (const ss of scopeSpans) {
+      const scope = ss.scope ?? ss.instrumentationLibrary;
       for (const span of ss.spans || []) {
         const tags: KeyValuePair[] = (span.attributes || []).map((a) => ({
           key: a.key,
@@ -217,6 +227,8 @@ export function parseOtlpTrace(data: unknown): PluginSpan[] {
           depth: 0,
           ...(statusCode ? { statusCode } : {}),
           ...(statusMessage ? { statusMessage } : {}),
+          ...(scope?.name ? { scopeName: scope.name } : {}),
+          ...(scope?.version ? { scopeVersion: scope.version } : {}),
         });
       }
     }

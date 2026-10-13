@@ -5,6 +5,7 @@ import { getStyles } from './LlmSpanDetail.styles';
 import { CopyButton, ToolCallCard, ToolCatalog, ToolResultCard } from './ToolVisualization';
 import { KeyValuePair, LlmMessage, LlmMessagePart, LlmSpanData, LlmTokenUsage, LlmInvocationParams, LlmToolCall, LlmToolDefinition, getSpanKindColor, getSpanKind, isOpenInferenceSpan, decodeUnicodeEscapes } from '../utils/llmUtils';
 import { estimateCost, formatCost } from '../utils/costUtils';
+import { formatAttributeValue } from '../utils/formatUtils';
 
 function estimateTokenCount(text: string): number {
   let asciiCharacters = 0;
@@ -409,17 +410,17 @@ function extractRetrievalDocuments(tags: KeyValuePair[]): RetrievalDocument[] {
     const field = match[2];
     if (!docs.has(idx)) { docs.set(idx, { index: idx }); }
     const doc = docs.get(idx)!;
-    if (field === 'document.id') { doc.id = String(tag.value); }
-    else if (field === 'document.score') { doc.score = String(tag.value); }
-    else if (field === 'document.content') { doc.content = String(tag.value); }
-    else if (field === 'document.metadata') { doc.metadata = String(tag.value); }
+    if (field === 'document.id') { doc.id = formatAttributeValue(tag.value); }
+    else if (field === 'document.score') { doc.score = formatAttributeValue(tag.value); }
+    else if (field === 'document.content') { doc.content = formatAttributeValue(tag.value); }
+    else if (field === 'document.metadata') { doc.metadata = formatAttributeValue(tag.value); }
   }
   return Array.from(docs.values()).sort((a, b) => a.index - b.index);
 }
 
 function getAttrValue(tags: KeyValuePair[], key: string): string | undefined {
   const tag = tags.find((t) => t.key === key);
-  return tag !== undefined ? decodeUnicodeEscapes(String(tag.value)) : undefined;
+  return tag !== undefined ? decodeUnicodeEscapes(formatAttributeValue(tag.value)) : undefined;
 }
 
 function OpenInferenceSpanDetail({ tags, spanKind }: { tags: KeyValuePair[]; spanKind: string }) {
@@ -447,9 +448,9 @@ function OpenInferenceSpanDetail({ tags, spanKind }: { tags: KeyValuePair[]; spa
       if (!map.has(idx)) { map.set(idx, { index: idx }); }
       const entry = map.get(idx)!;
       const field = m[2];
-      if (field === 'document.content' || field === 'document.text') { entry.document = String(tag.value); }
-      else if (field === 'score') { entry.score = String(tag.value); }
-      else if (field === 'relevance_score') { entry.relevanceScore = String(tag.value); }
+      if (field === 'document.content' || field === 'document.text') { entry.document = formatAttributeValue(tag.value); }
+      else if (field === 'score') { entry.score = formatAttributeValue(tag.value); }
+      else if (field === 'relevance_score') { entry.relevanceScore = formatAttributeValue(tag.value); }
     }
     map.forEach((v) => results.push(v));
     return results.sort((a, b) => a.index - b.index);

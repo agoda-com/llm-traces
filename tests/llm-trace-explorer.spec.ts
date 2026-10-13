@@ -1,7 +1,7 @@
 import { test, expect, Page } from '@playwright/test';
 import { SEARCH_RESPONSE, TRACE_RESPONSE, VERTEX_TRACE_RESPONSE, OTEL_GENAI_TRACE_RESPONSE, GENERIC_TRACE_RESPONSE, STRUCTURED_SEARCH_RESPONSE, STRUCTURED_TRACE_RESPONSE } from './fixtures/llm-trace';
 import { waitForToolbarLayout } from './waitForToolbarLayout';
-import { CONVENTION_SEARCH_RESPONSE, GENAI_EVENTS_TRACE, GENAI_TOOL_TRACE } from './fixtures/conventions';
+import { CONVENTION_SEARCH_RESPONSE, GENAI_EVENTS_TRACE, GENAI_TOOL_TRACE, STRUCTURED_ATTRIBUTES_TRACE } from './fixtures/conventions';
 
 const PLUGIN_URL = '/a/agoda-llmtraces-app';
 async function mockTempoApis(page: Page) {
@@ -1578,5 +1578,20 @@ test.describe('OTel GenAI tool spans', () => {
     await expect(detail.getByTestId('message-part-tool_call')).toContainText('search_docs');
     await expect(detail.getByTestId('message-part-tool_call')).toContainText('rate limits');
     await expect(detail.getByTestId('message-part-tool_result')).toContainText('doc-b');
+  });
+});
+
+test.describe('Structured attribute values', () => {
+  test('native array and key-value list attributes are read as data and displayed as before', async ({ page }) => {
+    await openConventionTrace(page, STRUCTURED_ATTRIBUTES_TRACE, 'structspan000001');
+    const detail = page.getByTestId('llm-span-detail');
+    await expect(detail.getByTestId('input-messages-section').getByTestId('message-block-system')).toContainText('Answer in French.');
+    await expect(detail.getByTestId('input-messages-section').getByText('Say hello.')).toBeVisible();
+    await expect(detail.getByTestId('output-section').getByText('Bonjour.')).toBeVisible();
+    await expect(detail.getByText('STOP')).toBeVisible();
+    await expect(detail.getByTestId('available-tools-section')).toContainText('Available Tools (1)');
+    const attributes = page.getByTestId('span-attrs-table');
+    await expect(attributes.getByRole('row', { name: /custom\.labels/ })).toContainText('alpha, beta');
+    await expect(attributes.getByRole('row', { name: /custom\.settings/ })).toContainText('region=eu, retries=2');
   });
 });
