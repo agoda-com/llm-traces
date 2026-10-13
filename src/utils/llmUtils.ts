@@ -2,6 +2,7 @@
 // Extracts LLM span data from OpenInference / OTel GenAI / Vertex AI / generic conventions.
 
 import { formatAttributeValue } from './formatUtils.ts';
+import { extractVercelAi, getVercelAiDisplayName, getVercelAiKind, getVercelAiOperation, type FrameworkSpan } from './frameworkAdapters.ts';
 
 export interface KeyValuePair {
   key: string;
@@ -82,8 +83,12 @@ const FRAMEWORK_BY_SCOPE_NAME: Record<string, LlmFramework> = {
  * Identifies the framework that emitted a span from its instrumentation scope name.
  * Trace totals are computed without a scope, so detection rules must not depend on it alone.
  */
-export function detectFramework(_tags: KeyValuePair[], scope?: SpanScope): LlmFramework | undefined {
-  return scope?.name ? FRAMEWORK_BY_SCOPE_NAME[scope.name] : undefined;
+export function detectFramework(tags: KeyValuePair[], scope?: SpanScope): LlmFramework | undefined {
+  const byScope = scope?.name ? FRAMEWORK_BY_SCOPE_NAME[scope.name] : undefined;
+  if (byScope) {
+    return byScope;
+  }
+  return getVercelAiOperation(tags) ? 'vercel-ai' : undefined;
 }
 
 export interface LlmSpanData {
@@ -243,7 +248,8 @@ function normalizeToolDefinition(raw: unknown, index: number): LlmToolDefinition
   const definition = outer && isRecord(outer.function) ? outer.function : outer;
   const validName = definition && typeof definition.name === 'string' && definition.name.trim() !== '';
   const description = definition && typeof definition.description === 'string' ? definition.description : undefined;
-  const parameters = definition?.parameters ?? definition?.parameters_json_schema ?? definition?.parametersJsonSchema;
+  const parameters = definition?.parameters ?? definition?.parameters_json_schema ?? definition?.parametersJsonSchema
+    ?? definition?.inputSchema ?? definition?.input_schema;
   const strictValue = definition?.strict ?? outer?.strict;
   return {
     index,
@@ -891,10 +897,15 @@ function extractGenAiToolSpan(tags: KeyValuePair[]): { input: LlmMessage[]; outp
   return { ...buildToolCallMessages(name, getAttr(tags, 'gen_ai.tool.call.id'), args, response), tools };
 }
 
-function detectConvention(tags: KeyValuePair[]): LlmConvention | null {
+function detectConvention(tags: KeyValuePair[], framework = detectFramework(tags)): LlmConvention | null {
   const oiKind = getAttr(tags, 'openinference.span.kind');
   if (oiKind) {
     return 'openinference';
+  }
+  // The AI SDK records OTel GenAI attributes next to its own, but its provider name can look like
+  // Vertex ("google.vertex.chat"), so it is recognised before the Vertex checks.
+  if (framework === 'vercel-ai') {
+    return 'otel-genai';
   }
   const genAiSystem = getAttr(tags, 'gen_ai.system');
   if (genAiSystem && (genAiSystem.includes('vertex') || genAiSystem.includes('gcp'))) {
@@ -1190,8 +1201,48 @@ function extractGeneric(tags: KeyValuePair[], logs: SpanLog[], operationName?: s
   };
 }
 
+// Fills what the standard extraction found nothing for with what the framework's own attributes say.
+function applyFrameworkSpan(data: Omit<LlmSpanData, 'isLlm'>, span: FrameworkSpan | undefined): Omit<LlmSpanData, 'isLlm'> {
+  if (!span) {
+    return data;
+  }
+  const hasMessages = data.inputMessages.length > 0 || data.outputMessages.length > 0;
+  const toolMessages = span.tool && !hasMessages
+    ? buildToolCallMessages(span.tool.name ?? 'unknown', span.tool.id, toolPayloadText(span.tool.args), toolPayloadText(span.tool.result))
+    : undefined;
+  const invocationParams: LlmInvocationParams = { ...data.invocationParams };
+  for (const [key, value] of Object.entries(span.params ?? {})) {
+    if (invocationParams[key] === undefined) {
+      invocationParams[key] = value;
+    }
+  }
+  return {
+    ...data,
+    model: data.model === 'unknown' && span.model ? span.model : data.model,
+    system: data.system ?? span.system,
+    inputMessages: data.inputMessages.length > 0 ? data.inputMessages : span.input !== undefined ? extractMessagesFromValue(span.input) : toolMessages?.input ?? [],
+    outputMessages: data.outputMessages.length > 0 ? data.outputMessages : span.output !== undefined ? extractMessagesFromValue(span.output) : toolMessages?.output ?? [],
+    tools: data.tools.length > 0 ? data.tools : toolDefinitionsFromValue(span.tools),
+    tokenUsage: {
+      input: data.tokenUsage.input ?? span.usage?.input,
+      output: data.tokenUsage.output ?? span.usage?.output,
+      total: data.tokenUsage.total ?? span.usage?.total,
+    },
+    invocationParams,
+    finishReason: data.finishReason ?? span.finishReason,
+  };
+}
+
+// A span that repeats what its children already report is not a model call of its own:
+// counting it would double the trace totals.
+function isModelCall(tags: KeyValuePair[], framework: LlmFramework | undefined): boolean {
+  const kind = getSpanKind(tags);
+  return kind !== 'TOOL' && !(framework === 'vercel-ai' && kind === 'CHAIN');
+}
+
 export function extractLlmSpanData(tags: KeyValuePair[], logs: SpanLog[], operationName?: string, scope?: SpanScope): LlmSpanData {
-  const convention = detectConvention(tags);
+  const framework = detectFramework(tags, scope);
+  const convention = detectConvention(tags, framework);
   if (!convention) {
     return { isLlm: false, convention: 'unknown', model: '', inputMessages: [], outputMessages: [], tools: [], tokenUsage: {}, invocationParams: {}, finishReason: undefined };
   }
@@ -1222,13 +1273,15 @@ export function extractLlmSpanData(tags: KeyValuePair[], logs: SpanLog[], operat
     default:
       data = extractGeneric(tags, logs, operationName);
   }
+  if (framework === 'vercel-ai') {
+    data = applyFrameworkSpan(data, extractVercelAi(tags));
+  }
   // For OpenInference, only treat the span as LLM if it's an LLM call or a GUARDRAIL
   // (guardrails invoke an LLM internally and carry the same llm.* attributes).
   // CHAIN, TOOL, RETRIEVER etc. are structural spans, not the model call itself.
   const isLlm = convention === 'openinference'
     ? data.spanKind?.toUpperCase() === 'LLM' || data.spanKind?.toUpperCase() === 'GUARDRAIL'
-    : getSpanKind(tags) !== 'TOOL';
-  const framework = detectFramework(tags, scope);
+    : isModelCall(tags, framework);
   return { isLlm, ...data, ...(framework ? { framework } : {}) };
 }
 
@@ -1384,6 +1437,41 @@ export function getLlmDisplayAttributeKeys(
     addExact('input.value', 'output.value');
   }
 
+  if (data.framework === 'vercel-ai') {
+    if (data.inputMessages.length > 0) {
+      addExact('ai.prompt.messages', 'ai.prompt', 'ai.toolCall.args', 'ai.toolCall.input', 'ai.values', 'ai.value');
+    }
+    if (data.outputMessages.length > 0) {
+      addExact(
+        'ai.response.text', 'ai.response.toolCalls', 'ai.response.object',
+        'ai.result.text', 'ai.result.toolCalls', 'ai.result.object',
+        'ai.toolCall.result', 'ai.toolCall.output'
+      );
+    }
+    if (data.tools.length > 0) {
+      addExact('ai.prompt.tools');
+    }
+    if (data.model && data.model !== 'unknown') {
+      addExact('ai.model.id');
+    }
+    if (data.system) {
+      addExact('ai.model.provider');
+    }
+    if (data.finishReason) {
+      addExact('ai.response.finishReason');
+    }
+    if (data.tokenUsage.input !== undefined || data.tokenUsage.output !== undefined || data.tokenUsage.total !== undefined) {
+      addPrefixes('ai.usage.');
+    }
+    if (Object.values(data.invocationParams).some((value) => value !== undefined && value !== null)) {
+      addExact('ai.prompt.toolChoice');
+      addPrefixes('ai.settings.');
+    }
+    if (getVercelAiKind(tags) === 'TOOL') {
+      addExact('ai.toolCall.name', 'ai.toolCall.id');
+    }
+  }
+
   return keys;
 }
 
@@ -1396,6 +1484,9 @@ export function isOpenInferenceSpan(tags: KeyValuePair[]): boolean {
 }
 
 export function isEmbeddingSpan(tags: KeyValuePair[]): boolean {
+  if (getVercelAiKind(tags) === 'EMBEDDING') {
+    return true;
+  }
   const requestType = tags.find((t) => t.key === 'llm.request.type');
   if (requestType) {
     return String(requestType.value).toLowerCase().includes('embedding');
@@ -1422,6 +1513,10 @@ export function isLlmSpan(tags: KeyValuePair[]): boolean {
   }
   if (getSpanKind(tags) === 'TOOL') {
     return false;
+  }
+  const vercelAiKind = getVercelAiKind(tags);
+  if (vercelAiKind) {
+    return vercelAiKind === 'LLM';
   }
   if (tags.some(
     (t) =>
@@ -1511,6 +1606,11 @@ export function getSpanKind(tags: KeyValuePair[]): string | undefined {
     return OTEL_OPERATION_TO_KIND[opName.toLowerCase()] ?? opName.toUpperCase();
   }
 
+  const vercelAiKind = getVercelAiKind(tags);
+  if (vercelAiKind) {
+    return vercelAiKind;
+  }
+
   // Frameworks such as Pydantic AI set no operation name on tool spans.
   if (hasGenAiToolIdentity(tags)) {
     return 'TOOL';
@@ -1530,6 +1630,11 @@ export function getSpanKind(tags: KeyValuePair[]): string | undefined {
   }
 
   return undefined;
+}
+
+/** The span name to show: the AI SDK names spans after the telemetry function id and the tool they call. */
+export function getSpanDisplayName(operationName: string, tags: KeyValuePair[]): string {
+  return getVercelAiDisplayName(tags) ?? operationName;
 }
 
 // OTel GenAI names agent spans "invoke_agent <name>" and "create_agent <name>".

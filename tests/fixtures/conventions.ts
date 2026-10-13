@@ -226,3 +226,99 @@ export const STRUCTURED_ATTRIBUTES_TRACE = buildTrace(CONVENTION_TRACE_ID, { nam
     },
   },
 ]);
+
+// ---------------------------------------------------------------------------
+// Area 4: Vercel AI SDK (instrumentation scope "ai")
+// ---------------------------------------------------------------------------
+
+export const VERCEL_AI_TRACE = buildTrace(CONVENTION_TRACE_ID, { name: 'ai', version: '5.0.0' }, [
+  {
+    spanId: 'aispan0000000001',
+    name: 'ai.generateText',
+    startMs: 0,
+    endMs: 1800,
+    attributes: {
+      'operation.name': 'ai.generateText weather-agent',
+      'ai.operationId': 'ai.generateText',
+      'ai.telemetry.functionId': 'weather-agent',
+      'ai.model.id': 'model-a',
+      'ai.model.provider': 'example.chat',
+      'ai.prompt': JSON.stringify({ system: 'You help with weather.', prompt: 'What is the weather in Paris?' }),
+      'ai.response.text': 'It is 21 degrees and sunny in Paris.',
+      'ai.usage.inputTokens': 180,
+      'ai.usage.outputTokens': 40,
+    },
+  },
+  {
+    spanId: 'aispan0000000002',
+    parentSpanId: 'aispan0000000001',
+    name: 'ai.generateText.doGenerate',
+    startMs: 50,
+    endMs: 700,
+    attributes: {
+      'operation.name': 'ai.generateText.doGenerate weather-agent',
+      'ai.operationId': 'ai.generateText.doGenerate',
+      'ai.telemetry.functionId': 'weather-agent',
+      'ai.model.id': 'model-a',
+      'ai.model.provider': 'example.chat',
+      'ai.prompt.messages': JSON.stringify([
+        { role: 'system', content: 'You help with weather.' },
+        { role: 'user', content: [{ type: 'text', text: 'What is the weather in Paris?' }] },
+      ]),
+      'ai.prompt.tools': [
+        JSON.stringify({
+          type: 'function',
+          name: 'getWeather',
+          description: 'Get the weather in a location',
+          inputSchema: { type: 'object', properties: { location: { type: 'string' } }, required: ['location'] },
+        }),
+      ],
+      'ai.prompt.toolChoice': '{"type":"auto"}',
+      'ai.settings.maxRetries': 2,
+      'ai.response.toolCalls': JSON.stringify([{ toolCallId: 'call_w1', toolName: 'getWeather', input: '{"location":"Paris"}' }]),
+      'ai.response.finishReason': 'tool-calls',
+      'ai.usage.inputTokens': 90,
+      'ai.usage.outputTokens': 15,
+      'gen_ai.system': 'example.chat',
+      'gen_ai.request.model': 'model-a',
+    },
+  },
+  {
+    spanId: 'aispan0000000003',
+    parentSpanId: 'aispan0000000001',
+    name: 'ai.toolCall',
+    startMs: 720,
+    endMs: 900,
+    attributes: {
+      'operation.name': 'ai.toolCall weather-agent',
+      'ai.operationId': 'ai.toolCall',
+      'ai.toolCall.name': 'getWeather',
+      'ai.toolCall.id': 'call_w1',
+      'ai.toolCall.args': '{"location":"Paris"}',
+      'ai.toolCall.result': '{"temperature":21,"conditions":"sunny"}',
+    },
+  },
+  {
+    spanId: 'aispan0000000004',
+    parentSpanId: 'aispan0000000001',
+    name: 'ai.generateText.doGenerate',
+    startMs: 920,
+    endMs: 1750,
+    attributes: {
+      'operation.name': 'ai.generateText.doGenerate weather-agent',
+      'ai.operationId': 'ai.generateText.doGenerate',
+      'ai.model.id': 'model-a',
+      'ai.prompt.messages': JSON.stringify([
+        { role: 'user', content: [{ type: 'text', text: 'What is the weather in Paris?' }] },
+        { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'call_w1', toolName: 'getWeather', input: { location: 'Paris' } }] },
+        { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'call_w1', toolName: 'getWeather', output: { type: 'json', value: { temperature: 21 } } }] },
+      ]),
+      'ai.response.text': 'It is 21 degrees and sunny in Paris.',
+      'ai.response.finishReason': 'stop',
+      'ai.usage.inputTokens': 90,
+      'ai.usage.outputTokens': 25,
+      'gen_ai.system': 'example.chat',
+      'gen_ai.request.model': 'model-a',
+    },
+  },
+]);

@@ -3,7 +3,7 @@ import React, { ReactNode, useMemo, useState } from 'react';
 import { useStyles2, Icon } from '@grafana/ui';
 import { getStyles } from './LlmSpanDetail.styles';
 import { CopyButton, ToolCallCard, ToolCatalog, ToolResultCard } from './ToolVisualization';
-import { KeyValuePair, LlmMessage, LlmMessagePart, LlmSpanData, LlmTokenUsage, LlmInvocationParams, LlmToolCall, LlmToolDefinition, getSpanKindColor, getSpanKind, isOpenInferenceSpan, decodeUnicodeEscapes } from '../utils/llmUtils';
+import { KeyValuePair, LlmFramework, LlmMessage, LlmMessagePart, LlmSpanData, LlmTokenUsage, LlmInvocationParams, LlmToolCall, LlmToolDefinition, getSpanKindColor, getSpanKind, isOpenInferenceSpan, decodeUnicodeEscapes } from '../utils/llmUtils';
 import { estimateCost, formatCost } from '../utils/costUtils';
 import { formatAttributeValue } from '../utils/formatUtils';
 
@@ -100,6 +100,14 @@ function getConventionLabel(convention: string): string {
     case 'vertex': return 'Vertex / ADK';
     case 'generic': return 'Generic';
     default: return convention;
+  }
+}
+
+function getFrameworkLabel(framework: LlmFramework): string {
+  switch (framework) {
+    case 'vercel-ai': return 'Vercel AI SDK';
+    case 'pydantic-ai': return 'Pydantic AI';
+    case 'langfuse': return 'Langfuse';
   }
 }
 
@@ -574,7 +582,7 @@ export function LlmSpanDetail({ tags, llmData }: LlmSpanDetailProps) {
             {spanKindLabel.toUpperCase()}
           </span>
         )}
-        <span className={styles.conventionBadge}>{getConventionLabel(llmData.convention)}</span>
+        <span className={styles.conventionBadge}>{llmData.framework ? getFrameworkLabel(llmData.framework) : getConventionLabel(llmData.convention)}</span>
         {llmData.system && <span className={styles.conventionBadge}>{llmData.system}</span>}
         {llmData.finishReason && <FinishReasonBadge reason={llmData.finishReason} />}
       </div>

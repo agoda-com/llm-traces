@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { useStyles2, useTheme2, Icon } from '@grafana/ui';
 import { getStyles } from './TraceDetail.styles';
 import { PluginSpan } from '../utils/tempoClient';
-import { decodeUnicodeEscapes, extractLlmSpanData, getAgentDescription, getLlmDisplayAttributeKeys, getSpanKind } from '../utils/llmUtils';
+import { decodeUnicodeEscapes, extractLlmSpanData, getAgentDescription, getLlmDisplayAttributeKeys, getSpanDisplayName, getSpanKind } from '../utils/llmUtils';
 import { pickAgentColor } from '../utils/agentColors';
 import { formatAttributeValue, formatDuration } from '../utils/formatUtils';
 import { KindIcon, getKindLabel } from './KindIcon';
@@ -82,7 +82,7 @@ export function SpanDetailPanel({ span, agentLayer }: SpanDetailPanelProps) {
   return (
     <div data-testid="span-detail-panel">
       <div className={styles.spanDetailHeader}>
-        <div className={styles.spanDetailTitle} data-testid="span-header-raw-name">{span.operationName}</div>
+        <div className={styles.spanDetailTitle} data-testid="span-header-raw-name">{getSpanDisplayName(span.operationName, span.tags)}</div>
         {(kind || agent) && (
           <div className={styles.spanDetailAgentRow}>
             {kind && (

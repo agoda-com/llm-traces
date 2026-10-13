@@ -6,7 +6,9 @@
 import {
   extractLlmSpanData,
   getLlmDisplayAttributeKeys,
+  getSpanDisplayName,
   getSpanKind,
+  isEmbeddingSpan,
   isLlmSpan,
   type KeyValuePair,
   type SpanLog,
@@ -274,6 +276,215 @@ describe('Tool span with only a result', () => {
 describe('Chat spans keep counting as model calls', () => {
   const result = extractLlmSpanData([kv('gen_ai.operation.name', 'chat'), kv('gen_ai.request.model', 'm'), kv('gen_ai.usage.input_tokens', 5)], []);
   assertEquals(result.isLlm, true, 'chat span isLlm');
+});
+
+// ---------------------------------------------------------------------------
+// Area 4: Vercel AI SDK (instrumentation scope "ai")
+// ---------------------------------------------------------------------------
+
+const AI_SDK_TOOL = JSON.stringify({
+  type: 'function',
+  name: 'getWeather',
+  description: 'Get the weather in a location',
+  inputSchema: { type: 'object', properties: { location: { type: 'string' } }, required: ['location'] },
+});
+
+describe('Vercel AI SDK 5 model call (doGenerate)', () => {
+  const messages = [
+    { role: 'system', content: 'You help with weather.' },
+    { role: 'user', content: [{ type: 'text', text: 'Weather in Paris?' }] },
+    { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'call_a', toolName: 'getWeather', input: { location: 'Paris' } }] },
+    { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'call_a', toolName: 'getWeather', output: { type: 'json', value: { temp: 21 } } }] },
+  ];
+  const tags = [
+    kv('operation.name', 'ai.generateText.doGenerate'),
+    kv('ai.operationId', 'ai.generateText.doGenerate'),
+    kv('ai.model.id', 'model-a'),
+    kv('ai.model.provider', 'example.chat'),
+    kv('ai.prompt.messages', JSON.stringify(messages)),
+    kv('ai.prompt.tools', [AI_SDK_TOOL]),
+    kv('ai.prompt.toolChoice', '{"type":"auto"}'),
+    kv('ai.settings.maxRetries', 2),
+    kv('ai.response.text', 'It is 21 degrees.'),
+    kv('ai.response.toolCalls', JSON.stringify([{ toolCallId: 'call_b', toolName: 'getWeather', input: '{"location":"Rome"}' }])),
+    kv('ai.response.finishReason', 'tool-calls'),
+    kv('ai.usage.inputTokens', 62),
+    kv('ai.usage.outputTokens', 85),
+    kv('gen_ai.system', 'example.chat'),
+    kv('gen_ai.request.model', 'model-a'),
+    kv('gen_ai.response.model', 'model-a-2025'),
+  ];
+  const result = extractLlmSpanData(tags, [], 'ai.generateText.doGenerate', { name: 'ai', version: '5.0.0' });
+  assertEquals(result.framework, 'vercel-ai', 'framework vercel-ai');
+  assertEquals(result.convention, 'otel-genai', 'convention otel-genai');
+  assertEquals(getSpanKind(tags), 'LLM', 'span kind LLM');
+  assertEquals(result.isLlm, true, 'counts as a model call');
+  assertEquals(result.model, 'model-a-2025', 'gen_ai.response.model wins over ai.model.id');
+  assertDeepEquals(result.inputMessages.map((m) => m.role), ['system', 'user', 'assistant', 'tool'], 'prompt messages');
+  assertEquals(result.inputMessages[1].content, 'Weather in Paris?', 'text part');
+  assertEquals(result.inputMessages[2].toolCalls?.[0].name, 'getWeather', 'assistant tool call name from toolName');
+  assertEquals(result.inputMessages[2].toolCalls?.[0].id, 'call_a', 'assistant tool call id from toolCallId');
+  assertEquals(result.inputMessages[2].toolCalls?.[0].arguments, '{"location":"Paris"}', 'assistant tool call arguments from input');
+  const toolResult = result.inputMessages[3].parts?.[0];
+  assert(toolResult?.type === 'tool_result' && toolResult.toolCallId === 'call_a' && toolResult.result !== undefined && JSON.stringify(toolResult.result) === '{"temp":21}', 'tool result value is unwrapped from output.value');
+  assertEquals(result.outputMessages.length, 1, 'one output message');
+  assertEquals(result.outputMessages[0].content, 'It is 21 degrees.', 'response text');
+  assertEquals(result.outputMessages[0].toolCalls?.[0].arguments, '{"location":"Rome"}', 'response tool call arguments');
+  assertEquals(result.tools[0]?.name, 'getWeather', 'tool definitions from ai.prompt.tools (array of JSON strings)');
+  assertDeepEquals(Object.keys((result.tools[0]?.parameters as Record<string, unknown>) ?? {}), ['type', 'properties', 'required'], 'inputSchema is the tool parameters');
+  assertEquals(result.tokenUsage.input, 62, 'input tokens from ai.usage.inputTokens');
+  assertEquals(result.tokenUsage.output, 85, 'output tokens from ai.usage.outputTokens');
+  assertEquals(result.finishReason, 'tool-calls', 'finish reason from ai.response.finishReason');
+  assertEquals(result.system, 'example.chat', 'system from gen_ai.system');
+  assertEquals((result.invocationParams as Record<string, unknown>).maxRetries, 2, 'ai.settings.maxRetries parameter');
+  assertEquals((result.invocationParams as Record<string, unknown>).toolChoice, 'auto', 'tool choice parameter');
+  const keys = getLlmDisplayAttributeKeys(tags, result);
+  assert(keys.has('ai.prompt.messages') && keys.has('ai.response.text') && keys.has('ai.prompt.tools') && keys.has('ai.usage.inputTokens'), 'ai.* attributes shown above are promoted out of the raw list');
+});
+
+describe('Vercel AI SDK 4 model call (legacy attribute names)', () => {
+  const tags = [
+    kv('ai.operationId', 'ai.generateText.doGenerate'),
+    kv('ai.model.id', 'model-b'),
+    kv('ai.prompt.messages', JSON.stringify([
+      { role: 'user', content: [{ type: 'text', text: 'Look it up' }] },
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'lookup', args: { q: 'x' } }] },
+      { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'c1', toolName: 'lookup', result: 'found' }] },
+    ])),
+    kv('ai.result.text', 'Done.'),
+    kv('ai.result.toolCalls', JSON.stringify([{ toolCallId: 'c2', toolName: 'lookup', args: '{"q":"y"}' }])),
+    kv('ai.usage.promptTokens', 30),
+    kv('ai.usage.completionTokens', 10),
+  ];
+  const result = extractLlmSpanData(tags, []);
+  assertEquals(result.framework, 'vercel-ai', 'detected without a scope from ai.operationId');
+  assertEquals(result.model, 'model-b', 'model from ai.model.id');
+  assertEquals(result.inputMessages[1].toolCalls?.[0].arguments, '{"q":"x"}', 'args in the assistant tool call');
+  assert(result.inputMessages[2].parts?.[0].type === 'tool_result' && result.inputMessages[2].parts[0].result === 'found', 'result in the tool message');
+  assertEquals(result.outputMessages[0].content, 'Done.', 'ai.result.text');
+  assertEquals(result.outputMessages[0].toolCalls?.[0].arguments, '{"q":"y"}', 'ai.result.toolCalls args');
+  assertEquals(result.tokenUsage.input, 30, 'ai.usage.promptTokens');
+  assertEquals(result.tokenUsage.output, 10, 'ai.usage.completionTokens');
+  assertEquals(result.tokenUsage.total, 40, 'total is input plus output when the SDK reports none');
+});
+
+describe('Vercel AI SDK operation ids map to span kinds', () => {
+  const kind = (operationId: string) => getSpanKind([kv('ai.operationId', operationId)]);
+  assertEquals(kind('ai.generateText.doGenerate'), 'LLM', 'generateText.doGenerate');
+  assertEquals(kind('ai.streamText.doStream'), 'LLM', 'streamText.doStream');
+  assertEquals(kind('ai.generateObject.doGenerate'), 'LLM', 'generateObject.doGenerate');
+  assertEquals(kind('ai.streamObject.doStream'), 'LLM', 'streamObject.doStream');
+  assertEquals(kind('ai.embed.doEmbed'), 'EMBEDDING', 'embed.doEmbed');
+  assertEquals(kind('ai.embedMany.doEmbed'), 'EMBEDDING', 'embedMany.doEmbed');
+  assertEquals(kind('ai.toolCall'), 'TOOL', 'toolCall');
+  assertEquals(kind('ai.generateText'), 'CHAIN', 'generateText wrapper');
+  assertEquals(kind('ai.streamText'), 'CHAIN', 'streamText wrapper');
+  assertEquals(kind('ai.generateObject'), 'CHAIN', 'generateObject wrapper');
+  assertEquals(getSpanKind([kv('operation.name', 'ai.streamText.doStream my-function')]), 'LLM', 'operation.name with a function id suffix');
+  assertEquals(getSpanKind([kv('operation.name', 'chat completion')]), undefined, 'operation.name without the ai. prefix is not an AI SDK span');
+});
+
+describe('Vercel AI SDK wrapper span', () => {
+  const tags = [
+    kv('operation.name', 'ai.generateText my-function'),
+    kv('ai.operationId', 'ai.generateText'),
+    kv('ai.telemetry.functionId', 'my-function'),
+    kv('ai.model.id', 'model-a'),
+    kv('ai.prompt', JSON.stringify({ system: 'Be brief.', prompt: 'Tell me a joke.' })),
+    kv('ai.response.text', 'Why did the chicken cross the road?'),
+    kv('ai.usage.inputTokens', 100),
+    kv('ai.usage.outputTokens', 20),
+    kv('ai.usage.totalTokens', 120),
+  ];
+  const result = extractLlmSpanData(tags, [], 'ai.generateText my-function', { name: 'ai' });
+  assertEquals(getSpanKind(tags), 'CHAIN', 'wrapper is a CHAIN');
+  assertEquals(result.isLlm, false, 'the wrapper repeats the usage of its model calls, so it is not a model call');
+  assertDeepEquals(result.inputMessages.map((m) => [m.role, m.content]), [['system', 'Be brief.'], ['user', 'Tell me a joke.']], 'ai.prompt system and prompt');
+  assertEquals(result.outputMessages[0].content, 'Why did the chicken cross the road?', 'ai.response.text');
+  assertEquals(result.model, 'model-a', 'model from ai.model.id');
+  assertEquals(result.tokenUsage.total, 120, 'usage is still shown on the wrapper');
+  assert(!isLlmSpan(tags), 'the wrapper is not an LLM span');
+  assertEquals(getSpanDisplayName('ai.generateText my-function', tags), 'my-function:ai.generateText', 'function id prefixes the operation in the display name');
+  assertEquals(getSpanDisplayName('ai.generateText', [kv('ai.operationId', 'ai.generateText')]), 'ai.generateText', 'no function id, no prefix');
+  assertEquals(getSpanDisplayName('GET /health', []), 'GET /health', 'other spans keep their name');
+});
+
+describe('Vercel AI SDK wrapper with a message list prompt', () => {
+  const tags = [
+    kv('ai.operationId', 'ai.streamText'),
+    kv('ai.prompt', JSON.stringify({ messages: [{ role: 'user', content: [{ type: 'text', text: 'Hi there' }] }] })),
+    kv('ai.response.text', 'Hello!'),
+  ];
+  const result = extractLlmSpanData(tags, []);
+  assertEquals(result.inputMessages[0]?.content, 'Hi there', 'messages inside ai.prompt');
+});
+
+describe('Vercel AI SDK tool call span', () => {
+  const tags = [
+    kv('operation.name', 'ai.toolCall'),
+    kv('ai.operationId', 'ai.toolCall'),
+    kv('ai.toolCall.name', 'getWeather'),
+    kv('ai.toolCall.id', 'call_a'),
+    kv('ai.toolCall.args', '{"location":"Paris"}'),
+    kv('ai.toolCall.result', '{"temp":21}'),
+  ];
+  const result = extractLlmSpanData(tags, [], 'ai.toolCall', { name: 'ai' });
+  assertEquals(getSpanKind(tags), 'TOOL', 'tool kind');
+  assertEquals(result.isLlm, false, 'not a model call');
+  assertEquals(result.inputMessages[0].toolCalls?.[0].name, 'getWeather', 'tool name');
+  assertEquals(result.inputMessages[0].toolCalls?.[0].id, 'call_a', 'tool call id');
+  assertEquals(result.inputMessages[0].toolCalls?.[0].arguments, '{"location":"Paris"}', 'arguments from ai.toolCall.args');
+  assert(result.outputMessages[0].parts?.[0].type === 'tool_result' && result.outputMessages[0].parts[0].result === '{"temp":21}', 'result from ai.toolCall.result');
+  assertEquals(getSpanDisplayName('ai.toolCall', tags), 'getWeather', 'tool spans are named after the tool');
+});
+
+describe('Vercel AI SDK object generation', () => {
+  const tags = [
+    kv('ai.operationId', 'ai.generateObject.doGenerate'),
+    kv('ai.model.id', 'model-a'),
+    kv('ai.prompt.messages', JSON.stringify([{ role: 'user', content: [{ type: 'text', text: 'Make a person' }] }])),
+    kv('ai.response.object', '{"name":"Ada","age":36}'),
+    kv('ai.response.finishReason', 'stop'),
+  ];
+  const result = extractLlmSpanData(tags, []);
+  assertEquals(result.outputMessages[0].content, '{"name":"Ada","age":36}', 'ai.response.object is the output');
+  assertEquals(result.isLlm, true, 'object generation is a model call');
+});
+
+describe('Vercel AI SDK embedding call', () => {
+  const tags = [
+    kv('ai.operationId', 'ai.embedMany.doEmbed'),
+    kv('ai.model.id', 'embed-a'),
+    kv('ai.values', ['"first text"', '"second text"']),
+    kv('ai.usage.tokens', 9),
+  ];
+  const result = extractLlmSpanData(tags, []);
+  assertEquals(getSpanKind(tags), 'EMBEDDING', 'embedding kind');
+  assertDeepEquals(result.inputMessages.map((m) => m.content), ['first text', 'second text'], 'embedded values are the input');
+  assertEquals(result.tokenUsage.input, 9, 'ai.usage.tokens is the input token count');
+  assert(isEmbeddingSpan(tags), 'isEmbeddingSpan');
+  assertEquals(result.isLlm, true, 'embedding tokens count towards trace totals');
+});
+
+describe('Vercel AI SDK 7 uses GenAI attributes under the ai scope', () => {
+  const tags = [
+    kv('gen_ai.operation.name', 'chat'),
+    kv('gen_ai.request.model', 'model-a'),
+    kv('gen_ai.system_instructions', 'Answer concisely.'),
+    kv('gen_ai.input.messages', JSON.stringify([{ role: 'user', content: 'hello' }])),
+    kv('gen_ai.output.messages', JSON.stringify([{ role: 'assistant', content: 'hi' }])),
+  ];
+  const result = extractLlmSpanData(tags, [], 'chat model-a', { name: 'ai', version: '7.0.0' });
+  assertEquals(result.framework, 'vercel-ai', 'scope ai');
+  assertDeepEquals(result.inputMessages.map((m) => [m.role, m.content]), [['system', 'Answer concisely.'], ['user', 'hello']], 'system instructions and input');
+  assertEquals(result.outputMessages[0].content, 'hi', 'output');
+  const tool = extractLlmSpanData([
+    kv('gen_ai.operation.name', 'execute_tool'),
+    kv('gen_ai.tool.name', 'get_weather'),
+    kv('gen_ai.tool.call.arguments', '{"location":"Berlin"}'),
+    kv('gen_ai.tool.call.result', '{"temperature":21}'),
+  ], [], 'execute_tool get_weather', { name: 'ai' });
+  assertEquals(tool.inputMessages[0].toolCalls?.[0].arguments, '{"location":"Berlin"}', 'v7 tool arguments');
 });
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 import { test, expect, Page } from '@playwright/test';
 import { SEARCH_RESPONSE, TRACE_RESPONSE, VERTEX_TRACE_RESPONSE, OTEL_GENAI_TRACE_RESPONSE, GENERIC_TRACE_RESPONSE, STRUCTURED_SEARCH_RESPONSE, STRUCTURED_TRACE_RESPONSE } from './fixtures/llm-trace';
 import { waitForToolbarLayout } from './waitForToolbarLayout';
-import { CONVENTION_SEARCH_RESPONSE, GENAI_EVENTS_TRACE, GENAI_TOOL_TRACE, STRUCTURED_ATTRIBUTES_TRACE } from './fixtures/conventions';
+import { CONVENTION_SEARCH_RESPONSE, GENAI_EVENTS_TRACE, GENAI_TOOL_TRACE, STRUCTURED_ATTRIBUTES_TRACE, VERCEL_AI_TRACE } from './fixtures/conventions';
 
 const PLUGIN_URL = '/a/agoda-llmtraces-app';
 async function mockTempoApis(page: Page) {
@@ -1593,5 +1593,50 @@ test.describe('Structured attribute values', () => {
     const attributes = page.getByTestId('span-attrs-table');
     await expect(attributes.getByRole('row', { name: /custom\.labels/ })).toContainText('alpha, beta');
     await expect(attributes.getByRole('row', { name: /custom\.settings/ })).toContainText('region=eu, retries=2');
+  });
+});
+
+test.describe('Vercel AI SDK', () => {
+  test('a model call shows the prompt, the tool call it requests, the tool definitions and the usage', async ({ page }) => {
+    await openConventionTrace(page, VERCEL_AI_TRACE, 'aispan0000000002');
+    const detail = page.getByTestId('llm-span-detail');
+    await expect(detail.getByText('Vercel AI SDK')).toBeVisible();
+    await expect(page.getByTestId('llm-span-kind')).toContainText('LLM');
+    await expect(detail.getByTestId('input-messages-section').getByTestId('message-block-system')).toContainText('You help with weather.');
+    await expect(detail.getByTestId('input-messages-section').getByText('What is the weather in Paris?')).toBeVisible();
+    await expect(detail.getByTestId('output-section').getByTestId('message-part-tool_call')).toContainText('getWeather');
+    await expect(detail.getByTestId('available-tools-section')).toContainText('Available Tools (1)');
+    await expect(detail.getByTestId('params-section')).toContainText('90');
+    await expect(detail.getByTestId('params-section')).toContainText('toolChoice');
+  });
+
+  test('a follow-up model call shows the earlier tool call and its result', async ({ page }) => {
+    await openConventionTrace(page, VERCEL_AI_TRACE, 'aispan0000000004');
+    const input = page.getByTestId('input-messages-section');
+    await expect(input.getByTestId('message-part-tool_call')).toContainText('call_w1');
+    await expect(input.getByTestId('message-part-tool_result')).toContainText('temperature');
+    await expect(page.getByTestId('output-section').getByText('It is 21 degrees and sunny in Paris.')).toBeVisible();
+  });
+
+  test('a tool call span shows the tool card', async ({ page }) => {
+    await openConventionTrace(page, VERCEL_AI_TRACE, 'aispan0000000003');
+    const detail = page.getByTestId('llm-span-detail');
+    await expect(page.getByTestId('llm-span-kind')).toContainText('TOOL');
+    await expect(detail.getByTestId('message-part-tool_call')).toContainText('Paris');
+    await expect(detail.getByTestId('message-part-tool_result')).toContainText('sunny');
+  });
+
+  test('the wrapper span is a CHAIN named after the telemetry function id', async ({ page }) => {
+    await openConventionTrace(page, VERCEL_AI_TRACE, 'aispan0000000001');
+    await expect(page.getByTestId('llm-span-kind')).toContainText('CHAIN');
+    await expect(page.getByTestId('span-detail-panel')).toContainText('weather-agent:ai.generateText');
+    await expect(page.getByTestId('output-section').getByText('It is 21 degrees and sunny in Paris.')).toBeVisible();
+  });
+
+  test('trace totals count the model calls once, not the wrapper', async ({ page }) => {
+    await openConventionTrace(page, VERCEL_AI_TRACE, 'aispan0000000001');
+    // Model calls: 90+15 and 90+25 tokens. The wrapper repeats 180+40 and is not counted.
+    await expect(page.getByTestId('trace-stats-row')).toContainText('220');
+    await expect(page.getByTestId('trace-stats-row')).not.toContainText('440');
   });
 });
